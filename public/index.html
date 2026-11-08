@@ -394,21 +394,9 @@
     }
 
     function populateStations(stations) {
-      const byCity = new Map();
-      for (const s of stations) {
-        const city = s.city || "其他";
-        if (!byCity.has(city)) byCity.set(city, []);
-        byCity.get(city).push(s);
-      }
-
       const savedStation = storageGet(STORAGE_STATION) || defaultStation;
-      stationSelect.innerHTML = [...byCity.entries()]
-        .map(
-          ([city, list]) =>
-            `<optgroup label="${city}">` +
-            list.map((s) => `<option value="${s.id}">${s.name}</option>`).join("") +
-            `</optgroup>`
-        )
+      stationSelect.innerHTML = stations
+        .map((s) => `<option value="${s.id}">${s.name}</option>`)
         .join("");
 
       const validIds = stations.map((s) => s.id);
@@ -439,6 +427,19 @@
     };
   }
 
+  // A short, curated list of nearby stations — not the full ~245 TRA
+  // stations, since the family only ever uses this handful.
+  const COMMON_STATIONS = [
+    { id: "0920", name: "八堵" },
+    { id: "0930", name: "七堵" },
+    { id: "0940", name: "百福" },
+    { id: "0960", name: "汐止" },
+    { id: "0970", name: "汐科" },
+    { id: "0980", name: "南港" },
+    { id: "0990", name: "松山" },
+    { id: "1000", name: "臺北" },
+  ];
+
   const boardA = createBoard({ suffix: "a", defaultStation: "0940", preferredDirection: 1 }); // 百福 · 南下
   const boardB = createBoard({ suffix: "b", defaultStation: "0970", preferredDirection: 0 }); // 汐科 · 北上
   const boards = [boardA, boardB];
@@ -450,9 +451,7 @@
   });
 
   (async function init() {
-    const resp = await fetch("/api/stations");
-    const data = await resp.json();
-    await Promise.all(boards.map((b) => b.init(data.stations)));
+    await Promise.all(boards.map((b) => b.init(COMMON_STATIONS)));
     setInterval(() => {
       if (!document.hidden) boards.forEach((b) => b.refresh());
     }, REFRESH_MS);
