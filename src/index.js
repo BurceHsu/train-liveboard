@@ -165,7 +165,7 @@ function isMainCorridor(stationLineMap, stationId) {
   return false;
 }
 
-async function getTrainBoard(env, stationId) {
+async function getTrainBoard(env, stationId, { direction, windowMinutes, limit } = {}) {
   const token = await getAccessToken(env);
   const { nowMinutes, dateStr } = taipeiNow();
 
@@ -228,7 +228,7 @@ async function getTrainBoard(env, stationId) {
         : `往${mostCommonDestination(destinationCounts[d])}`,
     }));
 
-  const trains = daily
+  let trains = daily
     .filter((t) => t.Direction === 0 || t.Direction === 1)
     .map((t) => {
       const [h, m] = t.DepartureTime.split(":").map(Number);
@@ -253,6 +253,18 @@ async function getTrainBoard(env, stationId) {
     })
     .filter((t) => t.suspended || t.diffMinutes >= -3) // keep due-any-second trains, drop ones long gone; always keep suspended ones so people see why their train vanished
     .sort((a, b) => a.diffMinutes - b.diffMinutes);
+
+  // Optional server-side filtering, mainly for simple clients (e.g. an iOS
+  // Shortcuts widget) that can't easily filter/sort JSON themselves.
+  if (direction === 0 || direction === 1) {
+    trains = trains.filter((t) => t.direction === direction);
+  }
+  if (typeof windowMinutes === "number") {
+    trains = trains.filter((t) => t.suspended || t.diffMinutes <= windowMinutes);
+  }
+  if (typeof limit === "number") {
+    trains = trains.slice(0, limit);
+  }
 
   const stations = await getStations(env, token);
   const station = stations.find((s) => s.StationID === stationId);
@@ -301,8 +313,17 @@ export default {
       if (!/^\d{3,5}$/.test(stationId)) {
         return Response.json({ error: "車站代號格式錯誤。" }, { status: 400 });
       }
+
+      const directionParam = url.searchParams.get("direction");
+      const direction =
+        directionParam === "0" || directionParam === "1" ? Number(directionParam) : undefined;
+      const windowParam = url.searchParams.get("window");
+      const windowMinutes = windowParam && /^\d+$/.test(windowParam) ? Number(windowParam) : undefined;
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam && /^\d+$/.test(limitParam) ? Number(limitParam) : undefined;
+
       try {
-        const data = await getTrainBoard(env, stationId);
+        const data = await getTrainBoard(env, stationId, { direction, windowMinutes, limit });
         return Response.json(data);
       } catch (err) {
         return Response.json(
