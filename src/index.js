@@ -266,12 +266,9 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
     trains = trains.slice(0, limit);
   }
 
-  const stations = await getStations(env, token);
-  const station = stations.find((s) => s.StationID === stationId);
-
   return {
     stationId,
-    stationName: station?.StationName?.Zh_tw ?? daily[0]?.StationName?.Zh_tw ?? "",
+    stationName: daily[0]?.StationName?.Zh_tw ?? "",
     onCorridor,
     directionOptions,
     updateTime: live[0]?.UpdateTime ?? null,
