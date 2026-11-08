@@ -60,3 +60,27 @@ wrangler secret put TDX_CLIENT_ID
 wrangler secret put TDX_CLIENT_SECRET
 wrangler deploy
 ```
+
+## Staging
+
+This is a public site, so changes go to staging first:
+https://train-liveboard-staging.bruce-hsu.workers.dev
+
+Staging is a separate Worker (`train-liveboard-staging`) defined under
+`[env.staging]` in [wrangler.toml](wrangler.toml), with its own KV namespace
+and its own copy of the secrets, so it never shares cached data with
+production.
+
+```bash
+npm run deploy:staging   # ships to the staging URL
+# check it, then:
+npm run deploy           # ships to production
+```
+
+One-time setup for a fresh staging environment:
+
+```bash
+wrangler kv namespace create TOKEN_KV --env staging   # put the id in wrangler.toml
+wrangler secret put TDX_CLIENT_ID --env staging
+wrangler secret put TDX_CLIENT_SECRET --env staging
+```

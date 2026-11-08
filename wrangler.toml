@@ -9,3 +9,13 @@ binding = "ASSETS"
 [[kv_namespaces]]
 binding = "TOKEN_KV"
 id = "1565511287804e53a9e7891055ac5cae"
+
+# Staging: a separate Worker (different workers.dev URL), its own KV
+# namespace so staging's cache never touches production's, and its own
+# secrets (set separately with `wrangler secret put <NAME> --env staging`).
+[env.staging]
+name = "train-liveboard-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "TOKEN_KV"
+id = "b053a6ff7eff467086d6423b65be1a03"
