@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="百福南下" />
+<meta name="theme-color" content="#0f172a" />
+<title>百福站南下即時看板</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --delay: #f87171;
+    --ok: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    min-height: 100vh;
+    padding: env(safe-area-inset-top, 16px) 16px calc(env(safe-area-inset-bottom, 16px) + 16px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .wrap {
+    width: 100%;
+    max-width: 480px;
+  }
+  header {
+    text-align: center;
+    padding: 20px 0 12px;
+  }
+  header h1 {
+    font-size: 26px;
+    margin: 0;
+    font-weight: 700;
+  }
+  header p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 15px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .train {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 4px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+  }
+  .train:last-child { border-bottom: none; }
+  .train .time {
+    font-size: 32px;
+    font-weight: 700;
+    min-width: 88px;
+  }
+  .train .mid {
+    flex: 1;
+    padding: 0 12px;
+    min-width: 0;
+  }
+  .train .trainNo {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .train .meta {
+    font-size: 15px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .train .delay {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--delay);
+    white-space: nowrap;
+  }
+  .more-btn {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 14px;
+    background: transparent;
+    color: var(--accent);
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .empty, .loading, .err {
+    text-align: center;
+    color: var(--muted);
+    font-size: 17px;
+    padding: 36px 8px;
+  }
+  .err { color: var(--delay); }
+  .updated {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .disclaimer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+    margin-top: 10px;
+    padding: 0 8px;
+  }
+  details {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 14px 16px;
+    margin-top: 18px;
+  }
+  summary {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::after {
+    content: " ▾";
+  }
+  details[open] summary::after {
+    content: " ▴";
+  }
+  .howto {
+    margin-top: 12px;
+    font-size: 15px;
+    line-height: 1.8;
+    color: var(--text);
+  }
+  .howto h3 {
+    font-size: 15px;
+    color: var(--accent);
+    margin: 14px 0 4px;
+  }
+  .howto h3:first-child { margin-top: 0; }
+  .refresh-btn {
+    display: block;
+    width: 100%;
+    margin-top: 14px;
+    padding: 14px;
+    border: none;
+    border-radius: 14px;
+    background: var(--accent);
+    color: #04202f;
+    font-size: 17px;
+    font-weight: 700;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🚆 百福站 · 南下</h1>
+    <p>接下來 60 分鐘內的南下列車</p>
+  </header>
+
+  <div class="card">
+    <div id="list" class="loading">查詢中…</div>
+    <div id="updated" class="updated"></div>
+  </div>
+
+  <button class="more-btn" id="moreBtn" style="display:none">顯示到今天最後一班</button>
+  <button class="refresh-btn" id="refreshBtn">重新查詢</button>
+
+  <p class="disclaimer">
+    本資料為台鐵時刻表加上誤點資訊所合成，約有 2 分鐘延遲，並非車站第一手資料，僅供參考。
+  </p>
+
+  <details>
+    <summary>怎麼把這個網頁加到手機主畫面？</summary>
+    <div class="howto">
+      <h3>📱 iPhone（Safari）</h3>
+      <p>
+        用 Safari 瀏覽器打開這個網頁 → 按下方中間的「分享」圖示（方框加箭頭）
+        → 往下找「加入主畫面」→ 按「加入」。
+      </p>
+      <h3>🤖 Android（Chrome）</h3>
+      <p>
+        用 Chrome 瀏覽器打開這個網頁 → 按右上角「⋮」三個點
+        → 選「新增至主畫面」或「安裝應用程式」→ 按「新增」。
+      </p>
+      <p style="color: var(--muted); font-size: 13px;">
+        加入後，手機桌面會多一個圖示，點一下就能直接查看，跟開 App 一樣方便。
+      </p>
+    </div>
+  </details>
+</div>
+
+<script>
+  const WINDOW_MINUTES = 60;
+
+  const listEl = document.getElementById("list");
+  const updatedEl = document.getElementById("updated");
+  const refreshBtn = document.getElementById("refreshBtn");
+  const moreBtn = document.getElementById("moreBtn");
+
+  let allTrains = [];
+  let showAll = false;
+
+  function fmtUpdateTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `資料時間 ${hh}:${mm}`;
+  }
+
+  function trainHtml(t) {
+    const delayHtml =
+      t.delayMinutes > 0 ? `<div class="delay">誤點 ${t.delayMinutes} 分</div>` : "";
+    return `
+      <div class="train">
+        <div class="time">${t.time}</div>
+        <div class="mid">
+          <div class="trainNo">${t.trainType} ${t.trainNo}</div>
+          <div class="meta">往 ${t.destination}</div>
+        </div>
+        ${delayHtml}
+      </div>
+    `;
+  }
+
+  function renderList() {
+    const visible = showAll
+      ? allTrains
+      : allTrains.filter((t) => t.diffMinutes <= WINDOW_MINUTES);
+
+    if (visible.length === 0) {
+      listEl.className = "empty";
+      listEl.textContent = showAll
+        ? "今天沒有更多南下列車了"
+        : `接下來 ${WINDOW_MINUTES} 分鐘內沒有南下列車`;
+    } else {
+      listEl.className = "";
+      listEl.innerHTML = visible.map(trainHtml).join("");
+    }
+
+    const hasMore = allTrains.some((t) => t.diffMinutes > WINDOW_MINUTES);
+    moreBtn.style.display = !showAll && hasMore ? "block" : "none";
+  }
+
+  function render(data) {
+    allTrains = data.trains || [];
+    renderList();
+    updatedEl.textContent = fmtUpdateTime(data.updateTime);
+  }
+
+  async function load() {
+    listEl.className = "loading";
+    listEl.textContent = "查詢中…";
+    try {
+      const resp = await fetch("/api/liveboard");
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "查詢失敗");
+      render(data);
+    } catch (err) {
+      listEl.className = "err";
+      listEl.textContent = "查詢失敗，請稍後再試";
+    }
+  }
+
+  refreshBtn.addEventListener("click", load);
+  moreBtn.addEventListener("click", () => {
+    showAll = true;
+    renderList();
+  });
+  load();
+  setInterval(load, 60 * 1000);
+</script>
+</body>
+</html>

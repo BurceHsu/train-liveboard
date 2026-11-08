@@ -1,0 +1,11 @@
+name = "train-liveboard"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[kv_namespaces]]
+binding = "TOKEN_KV"
+id = "1565511287804e53a9e7891055ac5cae"
