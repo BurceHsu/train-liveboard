@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="百福南下" />
+<meta name="apple-mobile-web-app-title" content="台鐵看板" />
 <meta name="theme-color" content="#0f172a" />
-<title>百福站南下即時看板</title>
+<title>台鐵即時看板</title>
 <style>
   :root {
     --bg: #0f172a;
@@ -16,7 +16,7 @@
     --muted: #94a3b8;
     --accent: #38bdf8;
     --delay: #f87171;
-    --ok: #4ade80;
+    --suspended: #94a3b8;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -43,7 +43,7 @@
     padding: 20px 0 12px;
   }
   header h1 {
-    font-size: 26px;
+    font-size: 24px;
     margin: 0;
     font-weight: 700;
   }
@@ -51,6 +51,22 @@
     margin: 6px 0 0;
     color: var(--muted);
     font-size: 15px;
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .controls select {
+    flex: 1;
+    min-width: 0;
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 12px;
+    padding: 12px 10px;
+    font-size: 15px;
+    font-family: inherit;
   }
   .card {
     background: var(--card);
@@ -66,10 +82,14 @@
     border-bottom: 1px solid rgba(148, 163, 184, 0.15);
   }
   .train:last-child { border-bottom: none; }
+  .train.suspended { opacity: 0.55; }
   .train .time {
     font-size: 32px;
     font-weight: 700;
     min-width: 88px;
+  }
+  .train.suspended .time {
+    text-decoration: line-through;
   }
   .train .mid {
     flex: 1;
@@ -89,6 +109,12 @@
     font-size: 16px;
     font-weight: 700;
     color: var(--delay);
+    white-space: nowrap;
+  }
+  .train .suspended-tag {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--suspended);
     white-space: nowrap;
   }
   .more-btn {
@@ -173,9 +199,14 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>🚆 百福站 · 南下</h1>
-    <p>接下來 60 分鐘內的南下列車</p>
+    <h1 id="title">🚆 台鐵即時看板</h1>
+    <p id="subtitle">查詢中…</p>
   </header>
+
+  <div class="controls">
+    <select id="stationSelect" aria-label="車站"><option>載入車站中…</option></select>
+    <select id="directionSelect" aria-label="方向"></select>
+  </div>
 
   <div class="card">
     <div id="list" class="loading">查詢中…</div>
@@ -211,7 +242,15 @@
 
 <script>
   const WINDOW_MINUTES = 60;
+  const REFRESH_MS = 3 * 60 * 1000; // match the backend's live-board cache window
+  const STORAGE_STATION = "train-liveboard:station";
+  const STORAGE_DIRECTION_PREFIX = "train-liveboard:direction:";
+  const DEFAULT_STATION = "0940"; // 百福
 
+  const titleEl = document.getElementById("title");
+  const subtitleEl = document.getElementById("subtitle");
+  const stationSelect = document.getElementById("stationSelect");
+  const directionSelect = document.getElementById("directionSelect");
   const listEl = document.getElementById("list");
   const updatedEl = document.getElementById("updated");
   const refreshBtn = document.getElementById("refreshBtn");
@@ -219,6 +258,23 @@
 
   let allTrains = [];
   let showAll = false;
+  let refreshTimer = null;
+  let lastData = null;
+
+  function storageGet(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+  function storageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* ignore (private browsing etc.) */
+    }
+  }
 
   function fmtUpdateTime(iso) {
     if (!iso) return "";
@@ -229,16 +285,20 @@
   }
 
   function trainHtml(t) {
-    const delayHtml =
-      t.delayMinutes > 0 ? `<div class="delay">誤點 ${t.delayMinutes} 分</div>` : "";
+    let badge = "";
+    if (t.suspended) {
+      badge = `<div class="suspended-tag">今日停駛</div>`;
+    } else if (t.delayMinutes > 0) {
+      badge = `<div class="delay">誤點 ${t.delayMinutes} 分</div>`;
+    }
     return `
-      <div class="train">
-        <div class="time">${t.time}</div>
+      <div class="train ${t.suspended ? "suspended" : ""}">
+        <div class="time">${t.time.slice(0, 5)}</div>
         <div class="mid">
           <div class="trainNo">${t.trainType} ${t.trainNo}</div>
           <div class="meta">往 ${t.destination}</div>
         </div>
-        ${delayHtml}
+        ${badge}
       </div>
     `;
   }
@@ -246,49 +306,129 @@
   function renderList() {
     const visible = showAll
       ? allTrains
-      : allTrains.filter((t) => t.diffMinutes <= WINDOW_MINUTES);
+      : allTrains.filter((t) => t.suspended || t.diffMinutes <= WINDOW_MINUTES);
 
     if (visible.length === 0) {
       listEl.className = "empty";
-      listEl.textContent = showAll
-        ? "今天沒有更多南下列車了"
-        : `接下來 ${WINDOW_MINUTES} 分鐘內沒有南下列車`;
+      listEl.textContent = showAll ? "今天沒有更多列車了" : `接下來 ${WINDOW_MINUTES} 分鐘內沒有列車`;
     } else {
       listEl.className = "";
       listEl.innerHTML = visible.map(trainHtml).join("");
     }
 
-    const hasMore = allTrains.some((t) => t.diffMinutes > WINDOW_MINUTES);
-    moreBtn.style.display = !showAll && hasMore ? "block" : "none";
+    const hasMore = allTrains.some((t) => !t.suspended && t.diffMinutes > WINDOW_MINUTES);
+    moreBtn.style.display = hasMore ? "block" : "none";
+    moreBtn.textContent = showAll ? "收合" : "顯示到今天最後一班";
   }
 
-  function render(data) {
-    allTrains = data.trains || [];
+  function populateDirections(stationId, directionOptions) {
+    const savedDirection = storageGet(STORAGE_DIRECTION_PREFIX + stationId);
+    directionSelect.innerHTML = directionOptions
+      .map((d) => `<option value="${d.value}">${d.label}</option>`)
+      .join("");
+    const validValues = directionOptions.map((d) => String(d.value));
+    // With nothing saved yet, default to southbound (value 1) when available —
+    // e.g. Baifu's default view is southbound, matching the original design.
+    const defaultValue = validValues.includes("1") ? "1" : directionOptions[0]?.value ?? "";
+    directionSelect.value = validValues.includes(savedDirection) ? savedDirection : defaultValue;
+  }
+
+  // Re-renders from the last fetched response using whatever direction is
+  // currently selected — no network call needed to switch direction.
+  function applyDirection() {
+    if (!lastData) return;
+    const selectedDirection = Number(directionSelect.value);
+    const directionLabel =
+      lastData.directionOptions.find((d) => d.value === selectedDirection)?.label || "";
+
+    titleEl.textContent = `🚆 ${lastData.stationName}站 · ${directionLabel}`;
+    subtitleEl.textContent = `接下來 ${WINDOW_MINUTES} 分鐘內的${directionLabel}列車`;
+
+    allTrains = (lastData.trains || []).filter((t) => t.direction === selectedDirection);
+    showAll = false;
     renderList();
-    updatedEl.textContent = fmtUpdateTime(data.updateTime);
+    updatedEl.textContent = fmtUpdateTime(lastData.updateTime);
   }
 
-  async function load() {
+  let lastLoadAt = 0;
+  const MIN_LOAD_GAP_MS = 20 * 1000; // guard against any runaway/duplicate triggers
+
+  async function load({ force = false } = {}) {
+    const stationId = stationSelect.value;
+    if (!stationId) return;
+    if (!force && Date.now() - lastLoadAt < MIN_LOAD_GAP_MS) return;
+    lastLoadAt = Date.now();
+
     listEl.className = "loading";
     listEl.textContent = "查詢中…";
     try {
-      const resp = await fetch("/api/liveboard");
+      const resp = await fetch(`/api/liveboard?station=${encodeURIComponent(stationId)}`);
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "查詢失敗");
-      render(data);
+
+      lastData = data;
+      populateDirections(stationId, data.directionOptions);
+      applyDirection();
     } catch (err) {
       listEl.className = "err";
       listEl.textContent = "查詢失敗，請稍後再試";
     }
   }
 
-  refreshBtn.addEventListener("click", load);
+  async function loadStations() {
+    const resp = await fetch("/api/stations");
+    const data = await resp.json();
+
+    const byCity = new Map();
+    for (const s of data.stations) {
+      const city = s.city || "其他";
+      if (!byCity.has(city)) byCity.set(city, []);
+      byCity.get(city).push(s);
+    }
+
+    const savedStation = storageGet(STORAGE_STATION) || DEFAULT_STATION;
+    stationSelect.innerHTML = [...byCity.entries()]
+      .map(
+        ([city, stations]) =>
+          `<optgroup label="${city}">` +
+          stations.map((s) => `<option value="${s.id}">${s.name}</option>`).join("") +
+          `</optgroup>`
+      )
+      .join("");
+
+    const validIds = data.stations.map((s) => s.id);
+    stationSelect.value = validIds.includes(savedStation) ? savedStation : DEFAULT_STATION;
+  }
+
+  function resetRefreshTimer() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      if (!document.hidden) load();
+    }, REFRESH_MS);
+  }
+
+  stationSelect.addEventListener("change", () => {
+    storageSet(STORAGE_STATION, stationSelect.value);
+    load({ force: true });
+  });
+  directionSelect.addEventListener("change", () => {
+    storageSet(STORAGE_DIRECTION_PREFIX + stationSelect.value, directionSelect.value);
+    applyDirection(); // instant, client-side only — same data, different filter
+  });
+  refreshBtn.addEventListener("click", () => load({ force: true }));
   moreBtn.addEventListener("click", () => {
-    showAll = true;
+    showAll = !showAll;
     renderList();
   });
-  load();
-  setInterval(load, 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) load(); // catch up when the page comes back to front, throttled by MIN_LOAD_GAP_MS
+  });
+
+  (async function init() {
+    await loadStations();
+    await load({ force: true });
+    resetRefreshTimer();
+  })();
 </script>
 </body>
 </html>
