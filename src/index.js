@@ -251,7 +251,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         diffMinutes: estimatedMinutes - nowMinutes,
       };
     })
-    .filter((t) => t.suspended || t.diffMinutes >= -3) // keep due-any-second trains, drop ones long gone; always keep suspended ones so people see why their train vanished
+    .filter((t) => t.diffMinutes >= -3) // keep due-any-second (and still-relevant suspended) trains, drop ones long gone
     .sort((a, b) => a.diffMinutes - b.diffMinutes);
 
   // Optional server-side filtering, mainly for simple clients (e.g. an iOS
