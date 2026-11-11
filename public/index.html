@@ -109,6 +109,16 @@
     color: var(--muted);
     margin-top: 1px;
   }
+  .train.skip .time,
+  .train.skip .trainNo {
+    color: var(--muted);
+  }
+  .skip-tag {
+    font-size: 13px;
+    font-weight: 600;
+    margin-left: 2px;
+    white-space: nowrap;
+  }
   .train .delay {
     font-size: 14px;
     font-weight: 700;
@@ -261,6 +271,11 @@
   const DEFAULT_COUNT = 3; // show the N nearest trains by default
   const REFRESH_MS = 3 * 60 * 1000; // match the backend's live-board cache window
   const MIN_LOAD_GAP_MS = 20 * 1000; // guard against any runaway/duplicate triggers
+  // A screen left on all day would burn the TDX monthly quota in days, so
+  // auto-refresh stops after this long without the viewer touching anything.
+  const AUTO_REFRESH_LIMIT_MS = 15 * 60 * 1000;
+  let activeSince = Date.now();
+  const markActive = () => { activeSince = Date.now(); };
 
   function storageGet(key) {
     try {
@@ -293,10 +308,10 @@
       badge = `<div class="delay">誤點 ${t.delayMinutes} 分</div>`;
     }
     return `
-      <div class="train ${t.suspended ? "suspended" : ""}">
+      <div class="train ${t.suspended ? "suspended" : ""} ${t.skipsBaifu ? "skip" : ""}">
         <div class="time">${t.time.slice(0, 5)}</div>
         <div class="mid">
-          <div class="trainNo">${t.trainType} ${t.trainNo}</div>
+          <div class="trainNo">${t.trainType} ${t.trainNo}${t.skipsBaifu ? `<span class="skip-tag">（百福不停）</span>` : ""}</div>
           <div class="meta">往 ${t.destination}</div>
         </div>
         ${badge}
@@ -404,6 +419,7 @@
     }
 
     stationSelect.addEventListener("change", () => {
+      markActive();
       storageSet(STORAGE_STATION, stationSelect.value);
       load({ force: true });
     });
@@ -423,18 +439,20 @@
       },
       refresh: () => load({ force: false }),
       forceRefresh: () => load({ force: true }),
+      showPaused() {
+        if (!lastData) return;
+        updatedEl.textContent = `${fmtUpdateTime(lastData.updateTime)} · 已暫停自動更新，請按「重新查詢」`;
+      },
     };
   }
 
   // A short, curated list of nearby stations — not the full ~245 TRA
   // stations, since the family only ever uses this handful.
   const COMMON_STATIONS = [
-    { id: "0920", name: "八堵" },
     { id: "0930", name: "七堵" },
     { id: "0940", name: "百福" },
     { id: "0960", name: "汐止" },
     { id: "0970", name: "汐科" },
-    { id: "0980", name: "南港" },
     { id: "0990", name: "松山" },
     { id: "1000", name: "臺北" },
   ];
@@ -444,15 +462,25 @@
   const boards = [boardA, boardB];
 
   const refreshBtn = document.getElementById("refreshBtn");
-  refreshBtn.addEventListener("click", () => boards.forEach((b) => b.forceRefresh()));
+  refreshBtn.addEventListener("click", () => {
+    markActive();
+    boards.forEach((b) => b.forceRefresh());
+  });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) boards.forEach((b) => b.refresh()); // throttled per-board by MIN_LOAD_GAP_MS
+    if (document.hidden) return;
+    markActive();
+    boards.forEach((b) => b.refresh()); // throttled per-board by MIN_LOAD_GAP_MS
   });
 
   (async function init() {
     await Promise.all(boards.map((b) => b.init(COMMON_STATIONS)));
     setInterval(() => {
-      if (!document.hidden) boards.forEach((b) => b.refresh());
+      if (document.hidden) return;
+      if (Date.now() - activeSince > AUTO_REFRESH_LIMIT_MS) {
+        boards.forEach((b) => b.showPaused());
+        return;
+      }
+      boards.forEach((b) => b.refresh());
     }, REFRESH_MS);
   })();
 </script>

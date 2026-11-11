@@ -44,6 +44,16 @@ const TDX_BASE = "https://tdx.transportdata.tw/api/basic/v2/Rail/TRA";
 const TOKEN_CACHE_KEY = "tdx_access_token";
 const MAIN_CORRIDOR_LINES = new Set(["WL", "WL-C"]); // verified south/north corridor
 
+// Only the stations the frontend offers. Every unseen station costs fresh
+// TDX calls, so arbitrary IDs from strangers/bots would burn the quota.
+const ALLOWED_STATIONS = new Set(["0930", "0940", "0960", "0970", "0990", "1000"]);
+
+// The family heads home to 百福 from these stations (all south of it), so
+// their northbound trains are flagged when they don't stop at 百福 — checked
+// against 百福's own timetable, not guessed from train type.
+const BAIFU = "0940";
+const SOUTH_OF_BAIFU = new Set(["0960", "0970", "0990", "1000"]);
+
 const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
 const DAILY_TIMETABLE_TTL = 1800; // 30 min: a day's schedule barely changes
 const STATIC_DATA_TTL = 86400; // 1 day: station/line lists are effectively static
@@ -96,7 +106,20 @@ function taipeiNow() {
 // same upstream calls instead of each triggering a fresh one. A second,
 // non-expiring "stale" copy is kept as a fallback: if TDX is down or we hit
 // the rate limit, we serve slightly-old data instead of breaking the page.
-async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
+// Two boards often ask for the same uncached data at the same moment; share
+// one upstream call per isolate instead of spending quota twice.
+const inflight = new Map();
+
+function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
+  if (inflight.has(cacheKey)) return inflight.get(cacheKey);
+  const p = fetchJsonCachedOnce(env, cacheKey, ttlSeconds, url, token).finally(() =>
+    inflight.delete(cacheKey)
+  );
+  inflight.set(cacheKey, p);
+  return p;
+}
+
+async function fetchJsonCachedOnce(env, cacheKey, ttlSeconds, url, token) {
   const cached = await env.TOKEN_KV.get(cacheKey, { type: "json" });
   if (cached) return cached;
 
@@ -169,14 +192,17 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
   const token = await getAccessToken(env);
   const { nowMinutes, dateStr } = taipeiNow();
 
-  const [daily, live, stationLineMap] = await Promise.all([
+  const getDaily = (id) =>
     fetchJsonCached(
       env,
-      `daily_${dateStr}_${stationId}`,
+      `daily_${dateStr}_${id}`,
       DAILY_TIMETABLE_TTL,
-      `${TDX_BASE}/DailyTimetable/Station/${stationId}/${dateStr}?$format=JSON`,
+      `${TDX_BASE}/DailyTimetable/Station/${id}/${dateStr}?$format=JSON`,
       token
-    ),
+    );
+
+  const [dailyAll, live, stationLineMap, baifuDaily] = await Promise.all([
+    getDaily(stationId),
     fetchJsonCached(
       env,
       `live_${stationId}`,
@@ -185,7 +211,14 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
       token
     ),
     getStationLineMap(env, token),
+    // Nice-to-have: if this lookup fails, show the board without the flag.
+    SOUTH_OF_BAIFU.has(stationId) ? getDaily(BAIFU).catch(() => null) : null,
   ]);
+  // Unfiltered on purpose: a train that ends at 百福 still gets you there.
+  const baifuTrainNos = baifuDaily ? new Set(baifuDaily.map((t) => t.TrainNo)) : null;
+
+  // Trains whose last stop is this station can't be boarded here.
+  const daily = dailyAll.filter((t) => t.EndingStationID !== stationId);
 
   const liveByTrainNo = new Map();
   for (const t of live) {
@@ -244,9 +277,11 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         direction: t.Direction,
         time: t.DepartureTime,
         trainNo: t.TrainNo,
-        trainType: t.TrainTypeName?.Zh_tw ?? "",
+        // "自強(推拉式自強號且無自行車車廂)" → "自強": the detail wraps on phones.
+        trainType: (t.TrainTypeName?.Zh_tw ?? "").replace(/[(（].*$/, ""),
         destination: t.EndingStationName?.Zh_tw ?? "",
         suspended,
+        skipsBaifu: baifuTrainNos !== null && t.Direction === 0 && !baifuTrainNos.has(t.TrainNo),
         delayMinutes,
         diffMinutes: estimatedMinutes - nowMinutes,
       };
@@ -268,7 +303,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
 
   return {
     stationId,
-    stationName: daily[0]?.StationName?.Zh_tw ?? "",
+    stationName: dailyAll[0]?.StationName?.Zh_tw ?? "",
     onCorridor,
     directionOptions,
     updateTime: live[0]?.UpdateTime ?? null,
@@ -307,8 +342,8 @@ export default {
 
     if (url.pathname === "/api/liveboard") {
       const stationId = url.searchParams.get("station") || "0940";
-      if (!/^\d{3,5}$/.test(stationId)) {
-        return Response.json({ error: "車站代號格式錯誤。" }, { status: 400 });
+      if (!ALLOWED_STATIONS.has(stationId)) {
+        return Response.json({ error: "不支援這個車站。" }, { status: 400 });
       }
 
       const directionParam = url.searchParams.get("direction");
