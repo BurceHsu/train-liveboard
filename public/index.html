@@ -32,6 +32,7 @@
   }
   body {
     min-height: 100vh;
+    min-height: 100dvh;
     padding: env(safe-area-inset-top, 14px) 16px calc(env(safe-area-inset-bottom, 14px) + 14px);
     display: flex;
     flex-direction: column;
@@ -40,6 +41,9 @@
   .wrap {
     width: 100%;
     max-width: 480px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
   }
   header {
     text-align: center;
@@ -133,6 +137,9 @@
     font-size: 13px;
     color: var(--muted);
     margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .train.skip .time,
   .train.skip .trainNo {
@@ -188,38 +195,6 @@
     margin-top: 4px;
     padding: 0 8px;
   }
-  details {
-    background: var(--card);
-    border-radius: 16px;
-    padding: 12px 16px;
-    margin-top: 10px;
-  }
-  summary {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--accent);
-    cursor: pointer;
-    list-style: none;
-  }
-  summary::-webkit-details-marker { display: none; }
-  summary::after {
-    content: " ▾";
-  }
-  details[open] summary::after {
-    content: " ▴";
-  }
-  .howto {
-    margin-top: 12px;
-    font-size: 15px;
-    line-height: 1.8;
-    color: var(--text);
-  }
-  .howto h3 {
-    font-size: 15px;
-    color: var(--accent);
-    margin: 14px 0 4px;
-  }
-  .howto h3:first-child { margin-top: 0; }
   .refresh-btn {
     display: block;
     width: 100%;
@@ -269,13 +244,39 @@
     0%, 100% { opacity: 0.25; }
     50% { opacity: 1; }
   }
-  .peek-wrap {
+  .cat-stage {
+    flex: 1 1 0;
+    min-height: 64px;
+    margin-top: 6px;
     display: flex;
     justify-content: center;
-    margin-top: 22px;
+    align-items: flex-end;
+    overflow: hidden;
     border-bottom: 4px solid var(--card);
   }
-  .cat-peek { width: 88px; height: 56px; display: block; }
+  .cat-full { display: block; flex: none; }
+  .cat-hop { animation: cat-hop 5s steps(1) infinite; }
+  .tail-up { animation: tail-up 0.9s steps(1) infinite; }
+  .tail-out { visibility: hidden; animation: tail-out 0.9s steps(1) infinite; }
+  .blink { visibility: hidden; animation: cat-blink 4s steps(1) infinite; }
+  @keyframes cat-hop {
+    0% { transform: translateY(0); }
+    92% { transform: translateY(-1px); }
+    96% { transform: translateY(0); }
+  }
+  @keyframes tail-up {
+    0% { visibility: visible; }
+    50% { visibility: hidden; }
+  }
+  @keyframes tail-out {
+    0% { visibility: hidden; }
+    50% { visibility: visible; }
+  }
+  @keyframes cat-blink {
+    0% { visibility: hidden; }
+    92% { visibility: visible; }
+    96% { visibility: hidden; }
+  }
   .bye {
     text-align: center;
     color: var(--muted);
@@ -283,7 +284,7 @@
     margin: 6px 0 0;
   }
   @media (prefers-reduced-motion: reduce) {
-    .loading .cat-head, .px-Z, .px-z { animation: none; }
+    .loading .cat-head, .px-Z, .px-z, .cat-hop, .tail-up, .tail-out, .blink { animation: none; }
   }
 </style>
 </head>
@@ -330,26 +331,7 @@
     本資料為台鐵時刻表加上誤點資訊所合成，約有 2 分鐘延遲，並非車站第一手資料，僅供參考。
   </p>
 
-  <details>
-    <summary>怎麼把這個網頁加到手機主畫面？</summary>
-    <div class="howto">
-      <h3>📱 iPhone（Safari）</h3>
-      <p>
-        用 Safari 瀏覽器打開這個網頁 → 按下方中間的「分享」圖示（方框加箭頭）
-        → 往下找「加入主畫面」→ 按「加入」。
-      </p>
-      <h3>🤖 Android（Chrome）</h3>
-      <p>
-        用 Chrome 瀏覽器打開這個網頁 → 按右上角「⋮」三個點
-        → 選「新增至主畫面」或「安裝應用程式」→ 按「新增」。
-      </p>
-      <p style="color: var(--muted); font-size: 13px;">
-        加入後，手機桌面會多一個圖示，點一下就能直接查看，跟開 App 一樣方便。
-      </p>
-    </div>
-  </details>
-
-  <div class="peek-wrap" id="footerCat"></div>
+  <div class="cat-stage" id="footerCat"></div>
   <p class="bye">出門小心，喵～</p>
 </div>
 
@@ -459,19 +441,54 @@
     return pixelSvg(outlined(rows.map((r) => r.join(""))), "cat-sleep");
   }
 
-  // Head and front paws only, resting on the ledge drawn by .peek-wrap.
-  const peekingCatSvg = () =>
-    pixelSvg(
-      outlined([...CAT_TOP, ...CAT_EYES_OPEN, "WWSWSWWWWWWWWWWSWSWW"]).slice(0, -1),
-      "cat-peek"
-    );
+  // The standing mascot: body without a tail, plus a tail drawn in two poses,
+  // a blink and a hop as layers the CSS animations swap on top of it.
+  const CAT_BODY_SIT = [
+    "...WWWWWWWWWWWWW....",
+    "..WWWWWWWWWWWWWW....",
+    "..KKWWWWWWWWWWWW....",
+    ".KKKKWWWWWWWWWWW....",
+    ".KKKKWWSWWWWSWWW....",
+    "..KKWWWSWWWWSWWW....",
+  ];
+  // [row, firstCol, lastCol] runs, drawn only where the body leaves the cell empty.
+  const TAIL_UP = [[14, 21, 22], [15, 21, 22], [16, 20, 22], [17, 19, 21], [18, 18, 20], [19, 17, 19], [20, 16, 19], [21, 16, 18]];
+  const TAIL_OUT = [[18, 22, 23], [19, 20, 23], [20, 17, 23], [21, 16, 22]];
+
+  function fullCatSvg() {
+    const pad = (rows) => rows.map((r) => r.padEnd(24, "."));
+    const base = pad([...CAT_TOP, ...CAT_EYES_OPEN, ...CAT_MOUTH, ...CAT_BODY_SIT]);
+    const blinking = pad([...CAT_TOP, ...CAT_EYES_SHUT, ...CAT_MOUTH, ...CAT_BODY_SIT]);
+    const withTail = (runs) =>
+      base.map((row, y) =>
+        [...row]
+          .map((ch, x) => (ch === "." && runs.some(([ty, a, b]) => ty === y && x >= a && x <= b) ? "K" : ch))
+          .join("")
+      );
+    const [baseO, blinkO, upO, outO] = [base, blinking, withTail(TAIL_UP), withTail(TAIL_OUT)].map(outlined);
+    // Only the cells that differ from the base sprite, so a layer can be shown over it.
+    const layer = (rows, cls) =>
+      `<g class="${cls}">${pixelRects(
+        rows.map((r, y) => [...r].map((ch, x) => (ch === baseO[y][x] ? "." : ch)).join(""))
+      )}</g>`;
+    return `<svg class="cat-full" viewBox="0 0 ${baseO[0].length} ${baseO.length}" shape-rendering="crispEdges" aria-hidden="true"><g class="cat-hop">${pixelRects(baseO)}${layer(upO, "tail-up")}${layer(outO, "tail-out")}${layer(blinkO, "blink")}</g></svg>`;
+  }
 
   const PAW_SVG = pixelSvg(PAW_ROWS, "paw");
 
   const stateHtml = (art, text) => `<div class="state-cat">${art}<div>${text}</div></div>`;
 
   document.getElementById("headerCat").innerHTML = catFaceSvg();
-  document.getElementById("footerCat").innerHTML = peekingCatSvg();
+  const footerCat = document.getElementById("footerCat");
+  footerCat.innerHTML = fullCatSvg();
+  // Fill whatever room is left under the content, in whole-pixel steps so the sprite stays crisp.
+  new ResizeObserver(() => {
+    const svg = footerCat.firstElementChild;
+    const [, , w, h] = svg.getAttribute("viewBox").split(" ").map(Number);
+    const px = Math.max(2, Math.min(6, Math.floor((footerCat.clientHeight - 4) / h)));
+    svg.style.width = `${w * px}px`;
+    svg.style.height = `${h * px}px`;
+  }).observe(footerCat);
   document.querySelectorAll(".paw-slot").forEach((el) => (el.innerHTML = PAW_SVG));
   document.getElementById("favicon").href =
     "data:image/svg+xml," +
@@ -519,11 +536,11 @@
       badge = `<div class="delay">誤點 ${t.delayMinutes} 分</div>`;
     }
     return `
-      <div class="train ${t.suspended ? "suspended" : ""} ${t.skipsBaifu ? "skip" : ""}">
+      <div class="train ${t.suspended ? "suspended" : ""} ${t.skipsArrival ? "skip" : ""}">
         <div class="time">${t.time.slice(0, 5)}</div>
         <div class="mid">
-          <div class="trainNo">${t.trainType} ${t.trainNo}${t.skipsBaifu ? `<span class="skip-tag">（百福不停）</span>` : ""}</div>
-          <div class="meta">往 ${t.destination}${t.baifuArrival ? ` · 預計 ${t.baifuArrival} 到百福` : ""}</div>
+          <div class="trainNo">${t.trainType} ${t.trainNo}${t.skipsArrival ? `<span class="skip-tag">（${t.arrivalStation}不停）</span>` : ""}</div>
+          <div class="meta">往 ${t.destination}${t.arrival ? ` · 預計 ${t.arrival} 到${t.arrivalStation}` : ""}</div>
         </div>
         ${badge}
       </div>

@@ -48,11 +48,14 @@ const MAIN_CORRIDOR_LINES = new Set(["WL", "WL-C"]); // verified south/north cor
 // TDX calls, so arbitrary IDs from strangers/bots would burn the quota.
 const ALLOWED_STATIONS = new Set(["0930", "0940", "0960", "0970", "0990", "1000"]);
 
-// The family heads home to 百福 from these stations (all south of it), so
-// their northbound trains are flagged when they don't stop at 百福 — checked
-// against 百福's own timetable, not guessed from train type.
-const BAIFU = "0940";
-const SOUTH_OF_BAIFU = new Set(["0960", "0970", "0990", "1000"]);
+// Which stop each board's riders are heading to, by direction: northbound
+// from the stations south of 百福 -> 百福 (home), southbound from the
+// stations north of 汐科 -> 汐科 (work). Trains that don't appear in that
+// stop's own timetable are flagged, not guessed from train type.
+const ARRIVAL_TARGETS = {
+  0: { id: "0940", name: "百福", from: new Set(["0960", "0970", "0990", "1000"]) },
+  1: { id: "0970", name: "汐科", from: new Set(["0930", "0940", "0960"]) },
+};
 
 const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
 const DAILY_TIMETABLE_TTL = 1800; // 30 min: a day's schedule barely changes
@@ -197,7 +200,16 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
       token
     );
 
-  const [dailyAll, live, stationLineMap, baifuDaily] = await Promise.all([
+  // Nice-to-have: if a target's timetable can't be fetched, the board still
+  // shows, just without arrival times.
+  const loadArrivalTimes = async (dir, target) => {
+    const rows = await getDaily(target.id).catch(() => null);
+    // Unfiltered on purpose: a train that ends at the target still gets you there.
+    return [dir, rows && new Map(rows.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]))];
+  };
+  const targets = Object.entries(ARRIVAL_TARGETS).filter(([, target]) => target.from.has(stationId));
+
+  const [dailyAll, live, stationLineMap, arrivalTimes] = await Promise.all([
     getDaily(stationId),
     fetchJsonCached(
       env,
@@ -207,13 +219,8 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
       token
     ),
     getStationLineMap(env, token),
-    // Nice-to-have: if this lookup fails, show the board without the flag.
-    SOUTH_OF_BAIFU.has(stationId) ? getDaily(BAIFU).catch(() => null) : null,
+    Promise.all(targets.map(([dir, target]) => loadArrivalTimes(dir, target))).then(Object.fromEntries),
   ]);
-  // Unfiltered on purpose: a train that ends at 百福 still gets you there.
-  const baifuTimes = baifuDaily
-    ? new Map(baifuDaily.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]))
-    : null;
 
   // Trains whose last stop is this station can't be boarded here.
   const daily = dailyAll.filter((t) => t.EndingStationID !== stationId);
@@ -271,7 +278,10 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         ? liveByTrainNo.get(t.TrainNo)
         : null; // null = not on the live board yet, not a confirmed on-time
       const estimatedMinutes = schedMinutes + (delayMinutes ?? 0);
-      const baifuTime = t.Direction === 0 && !suspended ? baifuTimes?.get(t.TrainNo) : undefined;
+      // A Map of the target's train numbers -> times, null if that lookup
+      // failed, undefined when this direction has no target from here.
+      const times = arrivalTimes[t.Direction];
+      const arrivalTime = suspended ? undefined : times?.get(t.TrainNo);
       return {
         direction: t.Direction,
         time: t.DepartureTime,
@@ -280,9 +290,10 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         trainType: (t.TrainTypeName?.Zh_tw ?? "").replace(/[(（].*$/, ""),
         destination: t.EndingStationName?.Zh_tw ?? "",
         suspended,
-        skipsBaifu: baifuTimes !== null && t.Direction === 0 && !baifuTimes.has(t.TrainNo),
-        // Expected arrival at 百福: its timetable time plus this train's current delay.
-        baifuArrival: baifuTime ? addMinutes(baifuTime, delayMinutes ?? 0) : null,
+        arrivalStation: times ? ARRIVAL_TARGETS[t.Direction].name : null,
+        skipsArrival: !!times && !times.has(t.TrainNo),
+        // Expected arrival at the target: its timetable time plus this train's current delay.
+        arrival: arrivalTime ? addMinutes(arrivalTime, delayMinutes ?? 0) : null,
         delayMinutes,
         diffMinutes: estimatedMinutes - nowMinutes,
       };
