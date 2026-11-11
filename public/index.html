@@ -495,7 +495,7 @@
         <div class="time">${t.time.slice(0, 5)}</div>
         <div class="mid">
           <div class="trainNo">${t.trainType} ${t.trainNo}${t.skipsBaifu ? `<span class="skip-tag">（百福不停）</span>` : ""}</div>
-          <div class="meta">往 ${t.destination}</div>
+          <div class="meta">往 ${t.destination}${t.baifuArrival ? ` · 預計 ${t.baifuArrival} 到百福` : ""}</div>
         </div>
         ${badge}
       </div>

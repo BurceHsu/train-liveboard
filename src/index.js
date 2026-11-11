@@ -94,6 +94,12 @@ async function getAccessToken(env) {
   return data.access_token;
 }
 
+function addMinutes(hhmm, delta) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const total = (h * 60 + m + delta) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
 function taipeiNow() {
   const d = new Date(Date.now() + 8 * 60 * 60 * 1000);
   return {
@@ -215,7 +221,9 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
     SOUTH_OF_BAIFU.has(stationId) ? getDaily(BAIFU).catch(() => null) : null,
   ]);
   // Unfiltered on purpose: a train that ends at 百福 still gets you there.
-  const baifuTrainNos = baifuDaily ? new Set(baifuDaily.map((t) => t.TrainNo)) : null;
+  const baifuTimes = baifuDaily
+    ? new Map(baifuDaily.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]))
+    : null;
 
   // Trains whose last stop is this station can't be boarded here.
   const daily = dailyAll.filter((t) => t.EndingStationID !== stationId);
@@ -273,6 +281,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         ? liveByTrainNo.get(t.TrainNo)
         : null; // null = not on the live board yet, not a confirmed on-time
       const estimatedMinutes = schedMinutes + (delayMinutes ?? 0);
+      const baifuTime = t.Direction === 0 && !suspended ? baifuTimes?.get(t.TrainNo) : undefined;
       return {
         direction: t.Direction,
         time: t.DepartureTime,
@@ -281,7 +290,9 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         trainType: (t.TrainTypeName?.Zh_tw ?? "").replace(/[(（].*$/, ""),
         destination: t.EndingStationName?.Zh_tw ?? "",
         suspended,
-        skipsBaifu: baifuTrainNos !== null && t.Direction === 0 && !baifuTrainNos.has(t.TrainNo),
+        skipsBaifu: baifuTimes !== null && t.Direction === 0 && !baifuTimes.has(t.TrainNo),
+        // Expected arrival at 百福: its timetable time plus this train's current delay.
+        baifuArrival: baifuTime ? addMinutes(baifuTime, delayMinutes ?? 0) : null,
         delayMinutes,
         diffMinutes: estimatedMinutes - nowMinutes,
       };
