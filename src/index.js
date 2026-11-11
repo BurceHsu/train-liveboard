@@ -112,20 +112,10 @@ function taipeiNow() {
 // same upstream calls instead of each triggering a fresh one. A second,
 // non-expiring "stale" copy is kept as a fallback: if TDX is down or we hit
 // the rate limit, we serve slightly-old data instead of breaking the page.
-// Two boards often ask for the same uncached data at the same moment; share
-// one upstream call per isolate instead of spending quota twice.
-const inflight = new Map();
-
-function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
-  if (inflight.has(cacheKey)) return inflight.get(cacheKey);
-  const p = fetchJsonCachedOnce(env, cacheKey, ttlSeconds, url, token).finally(() =>
-    inflight.delete(cacheKey)
-  );
-  inflight.set(cacheKey, p);
-  return p;
-}
-
-async function fetchJsonCachedOnce(env, cacheKey, ttlSeconds, url, token) {
+// Never share an in-flight promise between requests: if the request that
+// started it is cancelled (tab closed, page reloaded), it never settles and
+// every later request in that isolate waits on it forever.
+async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
   const cached = await env.TOKEN_KV.get(cacheKey, { type: "json" });
   if (cached) return cached;
 

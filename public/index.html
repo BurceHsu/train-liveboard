@@ -53,6 +53,29 @@
   .board {
     margin-bottom: 18px;
   }
+  .mode-switch {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    margin-bottom: 14px;
+    background: var(--card);
+    border-radius: 14px;
+  }
+  .mode-switch button {
+    flex: 1;
+    padding: 10px 8px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+  }
+  .mode-switch button[aria-pressed="true"] {
+    background: var(--accent);
+    color: #4a1730;
+  }
   .board-title {
     font-size: 17px;
     font-weight: 700;
@@ -270,6 +293,11 @@
     <h1><span id="headerCat"></span>台鐵即時看板</h1>
   </header>
 
+  <div class="mode-switch" role="group" aria-label="上下班模式">
+    <button type="button" data-mode="work" aria-pressed="false">上班模式</button>
+    <button type="button" data-mode="home" aria-pressed="false">下班模式</button>
+  </div>
+
   <div class="board" id="board-a">
     <div class="board-title"><span class="paw-slot"></span><span id="title-a">南下</span></div>
     <div class="controls">
@@ -334,9 +362,9 @@
     W: "#ffffff",
     G: "#b7cc3c", // eyes
     P: "#f2a0b0", // nose
-    R: "#e98aa0", // open mouth
+    M: "#4a4250", // mouth
     B: "#f9c2d4", // blush
-    S: "#9aa3b5", // mouth / toe lines
+    S: "#9aa3b5", // toe lines
     O: "#64748b", // outline so black fur shows on the dark page
     Z: "#94a3b8",
     z: "#94a3b8",
@@ -362,9 +390,9 @@
   const CAT_EYES_SHUT = [W20, W20, "WWWWKWWKWWWWKWWKWWWW", "WWWWWKKWWWWWWKKWWWWW"];
   const CAT_CHEEKS = "WWBBWWWWWPPWWWWWBBWW";
   const CAT_CHIN = "..WWWWWWWWWWWWWWWW..";
-  const CAT_MOUTH_HAPPY = [CAT_CHEEKS, "WWWWWWWWSWWSWWWWWWWW", ".WWWWWWWWRRWWWWWWWW.", CAT_CHIN];
-  const CAT_MOUTH_SHUT = [CAT_CHEEKS, "WWWWWWWWSWWSWWWWWWWW", ".WWWWWWWWSSWWWWWWWW.", CAT_CHIN];
-  const CAT_MOUTH_SAD = [CAT_CHEEKS, "WWWWWWWWWSSWWWWWWWWW", ".WWWWWWWSWWSWWWWWWW.", CAT_CHIN];
+  // The cat-smile "ω" (a sideways 3) under the nose; the error face flips it into a frown.
+  const CAT_MOUTH = [CAT_CHEEKS, "WWWWWWWMWMMWMWWWWWWW", ".WWWWWWWMWWMWWWWWWW.", CAT_CHIN];
+  const CAT_MOUTH_SAD = [CAT_CHEEKS, "WWWWWWWWWMMWWWWWWWWW", ".WWWWWWWMWWMWWWWWWW.", CAT_CHIN];
   const CAT_BODY = [
     "...WWWWWWWWWWWWW..KK",
     "..WWWWWWWWWWWWWW.KKK",
@@ -416,12 +444,12 @@
   const pixelSvg = (rows, cls) =>
     `<svg class="${cls}" viewBox="0 0 ${rows[0].length} ${rows.length}" shape-rendering="crispEdges" aria-hidden="true">${pixelRects(rows)}</svg>`;
 
-  const CAT_FACE = outlined([...CAT_TOP, ...CAT_EYES_OPEN, ...CAT_MOUTH_HAPPY]);
+  const CAT_FACE = outlined([...CAT_TOP, ...CAT_EYES_OPEN, ...CAT_MOUTH]);
   const catFaceSvg = ({ sad = false } = {}) =>
     pixelSvg(sad ? outlined([...CAT_TOP, ...CAT_EYES_OPEN, ...CAT_MOUTH_SAD]) : CAT_FACE, "cat-head");
 
   function sleepingCatSvg() {
-    const rows = [...CAT_TOP, ...CAT_EYES_SHUT, ...CAT_MOUTH_SHUT, ...CAT_BODY].map((r) => [
+    const rows = [...CAT_TOP, ...CAT_EYES_SHUT, ...CAT_MOUTH, ...CAT_BODY].map((r) => [
       ...r.padEnd(29, "."),
     ]);
     const stamp = (x, y, art) =>
@@ -502,9 +530,7 @@
     `;
   }
 
-  // One `Board` = one station + direction picker, independently configurable
-  // and persisted, so two boards can show e.g. 百福 southbound and 汐科
-  // northbound side by side.
+  // One `Board` = one station + direction picker, each configured and persisted on its own.
   function createBoard({ suffix, defaultStation, preferredDirection }) {
     const el = (id) => document.getElementById(`${id}-${suffix}`);
     const titleEl = el("title");
@@ -620,10 +646,7 @@
     });
 
     return {
-      async init(stations) {
-        populateStations(stations);
-        await load({ force: true });
-      },
+      setup: populateStations,
       refresh: () => load({ force: false }),
       forceRefresh: () => load({ force: true }),
       showPaused() {
@@ -644,32 +667,75 @@
     { id: "1000", name: "臺北" },
   ];
 
-  const boardA = createBoard({ suffix: "a", defaultStation: "0940", preferredDirection: 1 }); // 百福 · 南下
-  const boardB = createBoard({ suffix: "b", defaultStation: "0970", preferredDirection: 0 }); // 汐科 · 北上
-  const boards = [boardA, boardB];
+  // Only one board is shown (and fetched) at a time: 上班模式 = 百福 · 南下
+  // before 14:00 Taipei time, 下班模式 = 汐科 · 北上 from 14:00. The toggle
+  // overrides it until the clock crosses 14:00 or midnight.
+  const boardsByMode = {
+    work: createBoard({ suffix: "a", defaultStation: "0940", preferredDirection: 1 }),
+    home: createBoard({ suffix: "b", defaultStation: "0970", preferredDirection: 0 }),
+  };
+  const boardEls = { work: document.getElementById("board-a"), home: document.getElementById("board-b") };
+  const modeButtons = [...document.querySelectorAll(".mode-switch button")];
+  const HOME_MODE_FROM_HOUR = 14;
 
-  const refreshBtn = document.getElementById("refreshBtn");
-  refreshBtn.addEventListener("click", () => {
+  function clockMode() {
+    const hour = Number(
+      new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Taipei", hour: "numeric", hourCycle: "h23" }).format(
+        new Date()
+      )
+    );
+    return hour < HOME_MODE_FROM_HOUR ? "work" : "home";
+  }
+  let autoMode = clockMode();
+  let manualMode = null;
+  const currentMode = () => manualMode ?? autoMode;
+
+  function applyMode({ force = false } = {}) {
+    const mode = currentMode();
+    for (const m of Object.keys(boardEls)) boardEls[m].hidden = m !== mode;
+    modeButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+    boardsByMode[mode][force ? "forceRefresh" : "refresh"](); // refresh is throttled by MIN_LOAD_GAP_MS
+  }
+
+  // True when the clock has crossed a boundary, which also drops any manual choice.
+  function syncClock() {
+    const next = clockMode();
+    if (next === autoMode) return false;
+    autoMode = next;
+    manualMode = null;
+    return true;
+  }
+
+  modeButtons.forEach((b) =>
+    b.addEventListener("click", () => {
+      markActive();
+      manualMode = b.dataset.mode === autoMode ? null : b.dataset.mode;
+      applyMode();
+    })
+  );
+  document.getElementById("refreshBtn").addEventListener("click", () => {
     markActive();
-    boards.forEach((b) => b.forceRefresh());
+    boardsByMode[currentMode()].forceRefresh();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
     markActive();
-    boards.forEach((b) => b.refresh()); // throttled per-board by MIN_LOAD_GAP_MS
+    syncClock();
+    applyMode();
   });
 
-  (async function init() {
-    await Promise.all(boards.map((b) => b.init(COMMON_STATIONS)));
-    setInterval(() => {
-      if (document.hidden) return;
-      if (Date.now() - activeSince > AUTO_REFRESH_LIMIT_MS) {
-        boards.forEach((b) => b.showPaused());
-        return;
-      }
-      boards.forEach((b) => b.refresh());
-    }, REFRESH_MS);
-  })();
+  Object.values(boardsByMode).forEach((b) => b.setup(COMMON_STATIONS));
+  applyMode({ force: true });
+
+  setInterval(() => {
+    if (document.hidden) return;
+    if (syncClock()) return applyMode({ force: true });
+    if (Date.now() - activeSince > AUTO_REFRESH_LIMIT_MS) return boardsByMode[currentMode()].showPaused();
+    boardsByMode[currentMode()].refresh();
+  }, REFRESH_MS);
+  setInterval(() => {
+    if (!document.hidden && syncClock()) applyMode({ force: true });
+  }, 30 * 1000);
 </script>
 </body>
 </html>
