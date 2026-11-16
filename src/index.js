@@ -46,16 +46,15 @@ const MAIN_CORRIDOR_LINES = new Set(["WL", "WL-C"]); // verified south/north cor
 
 // Only the stations the frontend offers. Every unseen station costs fresh
 // TDX calls, so arbitrary IDs from strangers/bots would burn the quota.
-const ALLOWED_STATIONS = new Set(["0940", "0970", "0990"]); // 百福, 汐科, 松山
+const STATION_NAMES = { "0940": "百福", "0970": "汐科", "0990": "松山" };
+const ALLOWED_STATIONS = new Set(Object.keys(STATION_NAMES));
 
-// Which stop each board's riders are heading to, by direction: northbound
-// from 汐科/松山 -> 百福 (home), southbound from 百福 -> 汐科 (work). Trains
-// that don't appear in that stop's own timetable are flagged, not guessed
-// from train type. Other station/direction pairs get no arrival time.
-const ARRIVAL_TARGETS = {
-  0: { id: "0940", name: "百福", from: new Set(["0970", "0990"]) },
-  1: { id: "0970", name: "汐科", from: new Set(["0940"]) },
-};
+// The riders' other stop (`to`) is chosen on the phone: 上班模式 heads for the
+// 下班車站 and 下班模式 for the 上班車站. These stations are all on the verified
+// 西部幹線 corridor, where StationID rises going south, so a train travelling
+// toward `to` has Direction 1 (南下) if `to` is greater and 0 (北上) otherwise.
+// Trains that don't appear in the target's own timetable are flagged, not
+// guessed from train type; trains going the other way get no arrival time.
 
 const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
 const DAILY_TIMETABLE_TTL = 1800; // 30 min: a day's schedule barely changes
@@ -210,7 +209,7 @@ function isMainCorridor(stationLineMap, stationId) {
   return false;
 }
 
-async function getTrainBoard(env, stationId, { direction, windowMinutes, limit } = {}) {
+async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, target } = {}) {
   const token = await getAccessToken(env);
   const { nowMinutes, dateStr } = taipeiNow();
 
@@ -223,14 +222,15 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
       token
     );
 
-  // Nice-to-have: if a target's timetable can't be fetched, the board still
+  const arrivalDirection = target && target !== stationId ? (target > stationId ? 1 : 0) : null;
+  // Nice-to-have: if the target's timetable can't be fetched, the board still
   // shows, just without arrival times.
-  const loadArrivalTimes = async (dir, target) => {
-    const rows = await getDaily(target.id).catch(() => null);
+  const loadArrivalTimes = async () => {
+    if (arrivalDirection === null) return null;
+    const rows = await getDaily(target).catch(() => null);
     // Unfiltered on purpose: a train that ends at the target still gets you there.
-    return [dir, rows && new Map(rows.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]))];
+    return rows && new Map(rows.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]));
   };
-  const targets = Object.entries(ARRIVAL_TARGETS).filter(([, target]) => target.from.has(stationId));
 
   const [dailyAll, live, stationLineMap, arrivalTimes] = await Promise.all([
     getDaily(stationId),
@@ -242,7 +242,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
       token
     ),
     getStationLineMap(env, token),
-    Promise.all(targets.map(([dir, target]) => loadArrivalTimes(dir, target))).then(Object.fromEntries),
+    loadArrivalTimes(),
   ]);
 
   // Trains whose last stop is this station can't be boarded here.
@@ -301,9 +301,9 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         ? liveByTrainNo.get(t.TrainNo)
         : null; // null = not on the live board yet, not a confirmed on-time
       const estimatedMinutes = schedMinutes + (delayMinutes ?? 0);
-      // A Map of the target's train numbers -> times, null if that lookup
-      // failed, undefined when this direction has no target from here.
-      const times = arrivalTimes[t.Direction];
+      // A Map of the target's train numbers -> times; null if that lookup
+      // failed or the train runs away from the target.
+      const times = t.Direction === arrivalDirection ? arrivalTimes : null;
       const arrivalTime = suspended ? undefined : times?.get(t.TrainNo);
       return {
         direction: t.Direction,
@@ -313,7 +313,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit }
         trainType: (t.TrainTypeName?.Zh_tw ?? "").replace(/[(（].*$/, ""),
         destination: t.EndingStationName?.Zh_tw ?? "",
         suspended,
-        arrivalStation: times ? ARRIVAL_TARGETS[t.Direction].name : null,
+        arrivalStation: times ? STATION_NAMES[target] : null,
         skipsArrival: !!times && !times.has(t.TrainNo),
         // Expected arrival at the target: its timetable time plus this train's current delay.
         arrival: arrivalTime ? addMinutes(arrivalTime, delayMinutes ?? 0) : null,
@@ -386,11 +386,15 @@ export default {
         directionParam === "0" || directionParam === "1" ? Number(directionParam) : undefined;
       const windowParam = url.searchParams.get("window");
       const windowMinutes = windowParam && /^\d+$/.test(windowParam) ? Number(windowParam) : undefined;
+      const target = url.searchParams.get("to") || undefined;
+      if (target !== undefined && !ALLOWED_STATIONS.has(target)) {
+        return Response.json({ error: "不支援這個目的地車站。" }, { status: 400 });
+      }
       const limitParam = url.searchParams.get("limit");
       const limit = limitParam && /^\d+$/.test(limitParam) ? Number(limitParam) : undefined;
 
       try {
-        const data = await getTrainBoard(env, stationId, { direction, windowMinutes, limit });
+        const data = await getTrainBoard(env, stationId, { direction, windowMinutes, limit, target });
         return Response.json(data);
       } catch (err) {
         console.error(`liveboard ${stationId} failed:`, err?.message ?? err);

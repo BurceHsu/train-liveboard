@@ -416,7 +416,7 @@
     </div>
     <label class="field"><span>上班車站</span><select id="workStation"></select></label>
     <label class="field"><span>下班車站</span><select id="homeStation"></select></label>
-    <p class="settings-note">上班模式預設從上班車站往南，下班模式預設從下班車站往北。設定只存在這支手機裡，不會影響其他家人。</p>
+    <p class="settings-note">上班模式從上班車站出發，顯示預計到下班車站的時間；下班模式從下班車站出發，顯示預計到上班車站的時間。方向會依兩站的位置自動選好。設定只存在這支手機裡，不會影響其他家人。</p>
     <button type="button" class="refresh-btn" id="settingsDone">完成</button>
   </div>
 </div>
@@ -647,7 +647,9 @@
   }
 
   // One `Board` = one station + direction picker, each configured and persisted on its own.
-  function createBoard({ suffix, defaultStation, preferredDirection }) {
+  // `getTarget` returns the other stop of this commute (the other board's station);
+  // `onStationChange` lets the other board know its target moved.
+  function createBoard({ suffix, defaultStation, defaultDirection, getTarget, onStationChange }) {
     const el = (id) => document.getElementById(`${id}-${suffix}`);
     const titleEl = el("title");
     const stationSelect = el("stationSelect");
@@ -655,7 +657,6 @@
     const listEl = el("list");
     const updatedEl = el("updated");
     const moreBtn = el("moreBtn");
-    const boardEl = document.getElementById(`board-${suffix}`);
 
     const STORAGE_STATION = `train-liveboard:station:${suffix}`;
     const STORAGE_DIRECTION_PREFIX = `train-liveboard:direction:${suffix}:`;
@@ -688,8 +689,12 @@
         .map((d) => `<option value="${d.value}">${d.label}</option>`)
         .join("");
       const validValues = directionOptions.map((d) => String(d.value));
-      const fallback = validValues.includes(String(preferredDirection))
-        ? String(preferredDirection)
+      // Open on the direction that heads toward the other stop (south when it
+      // is further south); defaultDirection only matters if both are the same.
+      const target = getTarget();
+      const towardTarget = target !== stationId ? (target > stationId ? 1 : 0) : defaultDirection;
+      const fallback = validValues.includes(String(towardTarget))
+        ? String(towardTarget)
         : directionOptions[0]?.value ?? "";
       directionSelect.value = validValues.includes(savedDirection) ? savedDirection : fallback;
     }
@@ -725,7 +730,9 @@
         listEl.innerHTML = stateHtml(catFaceSvg(), "查詢中…");
       }
       try {
-        const resp = await fetch(`/api/liveboard?station=${encodeURIComponent(stationId)}`);
+        const target = getTarget();
+        const to = target !== stationId ? `&to=${encodeURIComponent(target)}` : "";
+        const resp = await fetch(`/api/liveboard?station=${encodeURIComponent(stationId)}${to}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || "查詢失敗");
 
@@ -752,6 +759,7 @@
     stationSelect.addEventListener("change", () => {
       markActive();
       storageSet(STORAGE_STATION, stationSelect.value);
+      onStationChange();
       load({ force: true });
     });
     directionSelect.addEventListener("change", () => {
@@ -766,13 +774,17 @@
     return {
       setup: populateStations,
       getStation: () => stationSelect.value,
-      // For the settings sheet. A hidden board loads when its mode is next shown.
+      // For the settings sheet, which then calls invalidate() and reloads.
       setStation(id) {
         if (![...stationSelect.options].some((o) => o.value === id)) return;
         stationSelect.value = id;
         storageSet(STORAGE_STATION, id);
-        if (boardEl.hidden) lastLoadAt = 0;
-        else load({ force: true });
+      },
+      // Drop what was loaded so the next refresh (even a throttled one) fetches
+      // again; a hidden board then loads when its mode is next shown.
+      invalidate() {
+        lastData = null;
+        lastLoadAt = 0;
       },
       refresh: () => load({ force: false }),
       forceRefresh: () => load({ force: true }),
@@ -793,10 +805,23 @@
   // Only one board is shown (and fetched) at a time: 上班模式 before 14:00
   // Taipei time, 下班模式 from 14:00; the toggle overrides that until the clock
   // crosses 14:00 or midnight. Each board opens on its own station (the 上班車站
-  // / 下班車站 setting, default 百福 southbound and 汐科 northbound).
+  // / 下班車站 setting, default 百福 and 汐科) and shows arrival times at the
+  // other board's station: 上班模式 heads for the 下班車站, 下班模式 for the 上班車站.
   const boardsByMode = {
-    work: createBoard({ suffix: "a", defaultStation: "0940", preferredDirection: 1 }),
-    home: createBoard({ suffix: "b", defaultStation: "0970", preferredDirection: 0 }),
+    work: createBoard({
+      suffix: "a",
+      defaultStation: "0940",
+      defaultDirection: 1,
+      getTarget: () => boardsByMode.home.getStation(),
+      onStationChange: () => boardsByMode.home.invalidate(),
+    }),
+    home: createBoard({
+      suffix: "b",
+      defaultStation: "0970",
+      defaultDirection: 0,
+      getTarget: () => boardsByMode.work.getStation(),
+      onStationChange: () => boardsByMode.work.invalidate(),
+    }),
   };
   const boardEls = { work: document.getElementById("board-a"), home: document.getElementById("board-b") };
   const modeButtons = [...document.querySelectorAll(".mode-switch button")];
@@ -884,6 +909,8 @@
     select.addEventListener("change", () => {
       markActive();
       boardsByMode[mode].setStation(select.value);
+      Object.values(boardsByMode).forEach((b) => b.invalidate()); // each board's target is the other's station
+      boardsByMode[currentMode()].forceRefresh();
     });
   }
 
