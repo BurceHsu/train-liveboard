@@ -61,36 +61,59 @@ const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
 const DAILY_TIMETABLE_TTL = 1800; // 30 min: a day's schedule barely changes
 const STATIC_DATA_TTL = 86400; // 1 day: station/line lists are effectively static
 
+// TDX sometimes answers the token request with 429 when called from
+// Cloudflare (not from a laptop), for minutes at a time, so retry briefly.
+async function requestToken(env, attempts) {
+  let failure;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 700));
+    const resp = await fetch(TDX_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: env.TDX_CLIENT_ID,
+        client_secret: env.TDX_CLIENT_SECRET,
+      }),
+    });
+    if (resp.ok) return resp.json();
+
+    const detail = (await resp.text().catch(() => "")).slice(0, 160);
+    const limits = ["retry-after", "ratelimit-reset", "x-ratelimit-remaining-minute"]
+      .map((h) => `${h}=${resp.headers.get(h)}`)
+      .join(" ");
+    failure = new Error(`TDX token request failed: ${resp.status} ${limits} ${detail}`);
+    if (resp.status !== 429 && resp.status < 500) break; // bad credentials etc.: retrying won't help
+  }
+  throw failure;
+}
+
 async function getAccessToken(env) {
   const cached = await env.TOKEN_KV.get(TOKEN_CACHE_KEY, { type: "json" });
   const now = Date.now();
 
-  // Only fetch a new token when the cached one is within an hour of expiring,
-  // to avoid calling TDX too often and risking a rate limit.
-  if (cached && cached.expires_at - now > 60 * 60 * 1000) {
+  // Renew a token that has under 8 hours left. TDX throttles token requests
+  // per source IP, so start early (a single quick try while the old token still
+  // works) instead of waiting for the last minute, which also means a family
+  // that only uses this morning and evening always has a live token.
+  if (cached && cached.expires_at - now > 8 * 60 * 60 * 1000) {
     return cached.access_token;
   }
 
-  const resp = await fetch(TDX_TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: env.TDX_CLIENT_ID,
-      client_secret: env.TDX_CLIENT_SECRET,
-    }),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`TDX token request failed: ${resp.status}`);
+  // Refreshing early is optional: the old token still works until it expires,
+  // so one quick try is enough then; with no usable token, keep trying.
+  const stillValid = cached && cached.expires_at > now;
+  let data;
+  try {
+    data = await requestToken(env, stillValid ? 1 : 3);
+  } catch (err) {
+    if (stillValid) return cached.access_token;
+    throw err;
   }
-
-  const data = await resp.json();
-  const expiresAt = now + data.expires_in * 1000;
 
   await env.TOKEN_KV.put(
     TOKEN_CACHE_KEY,
-    JSON.stringify({ access_token: data.access_token, expires_at: expiresAt }),
+    JSON.stringify({ access_token: data.access_token, expires_at: now + data.expires_in * 1000 }),
     { expirationTtl: data.expires_in }
   );
 
@@ -370,6 +393,7 @@ export default {
         const data = await getTrainBoard(env, stationId, { direction, windowMinutes, limit });
         return Response.json(data);
       } catch (err) {
+        console.error(`liveboard ${stationId} failed:`, err?.message ?? err);
         return Response.json(
           { error: "查詢台鐵即時資料失敗，請稍後再試。" },
           { status: 502 }
