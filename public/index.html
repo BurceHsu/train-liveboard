@@ -46,6 +46,7 @@
     flex-direction: column;
   }
   header {
+    position: relative;
     text-align: center;
     padding: 4px 0 16px;
   }
@@ -277,6 +278,77 @@
     92% { visibility: visible; }
     96% { visibility: hidden; }
   }
+  .gear-btn {
+    position: absolute;
+    top: -4px;
+    right: -11px;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+  }
+  .gear { width: 22px; height: 22px; display: block; }
+  .settings-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(2, 6, 23, 0.72);
+  }
+  .settings-overlay[hidden] { display: none; }
+  .settings-card {
+    width: 100%;
+    max-width: 360px;
+    padding: 16px;
+    background: var(--card);
+    border-radius: 18px;
+  }
+  .settings-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .settings-head h2 { margin: 0; font-size: 17px; }
+  .settings-close {
+    padding: 0 8px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 28px;
+    line-height: 1;
+  }
+  .field { display: block; margin-bottom: 12px; }
+  .field span {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .field select {
+    width: 100%;
+    padding: 11px 12px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 12px;
+    font-size: 15px;
+    font-family: inherit;
+  }
+  .settings-note {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
   .bye {
     text-align: center;
     color: var(--muted);
@@ -292,6 +364,7 @@
 <div class="wrap">
   <header>
     <h1><span id="headerCat"></span>台鐵即時看板</h1>
+    <button type="button" class="gear-btn" id="gearBtn" aria-label="設定"></button>
   </header>
 
   <div class="mode-switch" role="group" aria-label="上下班模式">
@@ -333,6 +406,19 @@
 
   <div class="cat-stage" id="footerCat"></div>
   <p class="bye">出門小心，喵～</p>
+</div>
+
+<div class="settings-overlay" id="settings" hidden>
+  <div class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="settings-head">
+      <h2 id="settingsTitle">設定</h2>
+      <button type="button" class="settings-close" id="settingsClose" aria-label="關閉">×</button>
+    </div>
+    <label class="field"><span>上班車站</span><select id="workStation"></select></label>
+    <label class="field"><span>下班車站</span><select id="homeStation"></select></label>
+    <p class="settings-note">上班模式預設從上班車站往南，下班模式預設從下班車站往北。設定只存在這支手機裡，不會影響其他家人。</p>
+    <button type="button" class="refresh-btn" id="settingsDone">完成</button>
+  </div>
 </div>
 
 <script>
@@ -476,6 +562,19 @@
 
   const PAW_SVG = pixelSvg(PAW_ROWS, "paw");
 
+  // 11x11 pixel gear (ring, 3x3 hole, eight teeth) drawn from a radius test.
+  const GEAR_ROWS = Array.from({ length: 11 }, (_, y) =>
+    Array.from({ length: 11 }, (_, x) => {
+      const dx = x - 5;
+      const dy = y - 5;
+      const r = Math.hypot(dx, dy);
+      const a = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 45;
+      const toothOffset = Math.min(a, 45 - a);
+      return (r > 1.9 && r <= 4.3) || (r > 4.3 && r <= 5.4 && toothOffset < 16) ? "X" : ".";
+    }).join("")
+  );
+  document.getElementById("gearBtn").innerHTML = pixelSvg(GEAR_ROWS, "gear");
+
   const stateHtml = (art, text) => `<div class="state-cat">${art}<div>${text}</div></div>`;
 
   document.getElementById("headerCat").innerHTML = catFaceSvg();
@@ -556,6 +655,7 @@
     const listEl = el("list");
     const updatedEl = el("updated");
     const moreBtn = el("moreBtn");
+    const boardEl = document.getElementById(`board-${suffix}`);
 
     const STORAGE_STATION = `train-liveboard:station:${suffix}`;
     const STORAGE_DIRECTION_PREFIX = `train-liveboard:direction:${suffix}:`;
@@ -620,6 +720,7 @@
       // Background auto-refreshes keep the current list instead of making it
       // jump to a loading state every 3 minutes.
       if (force || !lastData || lastData.stationId !== stationId) {
+        if (lastData?.stationId !== stationId) titleEl.textContent = `${stationSelect.selectedOptions[0]?.text ?? ""}站`;
         listEl.className = "loading";
         listEl.innerHTML = stateHtml(catFaceSvg(), "查詢中…");
       }
@@ -664,6 +765,15 @@
 
     return {
       setup: populateStations,
+      getStation: () => stationSelect.value,
+      // For the settings sheet. A hidden board loads when its mode is next shown.
+      setStation(id) {
+        if (![...stationSelect.options].some((o) => o.value === id)) return;
+        stationSelect.value = id;
+        storageSet(STORAGE_STATION, id);
+        if (boardEl.hidden) lastLoadAt = 0;
+        else load({ force: true });
+      },
       refresh: () => load({ force: false }),
       forceRefresh: () => load({ force: true }),
       showPaused() {
@@ -673,20 +783,17 @@
     };
   }
 
-  // A short, curated list of nearby stations — not the full ~245 TRA
-  // stations, since the family only ever uses this handful.
+  // Just the three stations the family uses, not the full ~245 TRA stations.
   const COMMON_STATIONS = [
-    { id: "0930", name: "七堵" },
     { id: "0940", name: "百福" },
-    { id: "0960", name: "汐止" },
     { id: "0970", name: "汐科" },
     { id: "0990", name: "松山" },
-    { id: "1000", name: "臺北" },
   ];
 
-  // Only one board is shown (and fetched) at a time: 上班模式 = 百福 · 南下
-  // before 14:00 Taipei time, 下班模式 = 汐科 · 北上 from 14:00. The toggle
-  // overrides it until the clock crosses 14:00 or midnight.
+  // Only one board is shown (and fetched) at a time: 上班模式 before 14:00
+  // Taipei time, 下班模式 from 14:00; the toggle overrides that until the clock
+  // crosses 14:00 or midnight. Each board opens on its own station (the 上班車站
+  // / 下班車站 setting, default 百福 southbound and 汐科 northbound).
   const boardsByMode = {
     work: createBoard({ suffix: "a", defaultStation: "0940", preferredDirection: 1 }),
     home: createBoard({ suffix: "b", defaultStation: "0970", preferredDirection: 0 }),
@@ -743,6 +850,42 @@
 
   Object.values(boardsByMode).forEach((b) => b.setup(COMMON_STATIONS));
   applyMode({ force: true });
+
+  // Settings sheet. The two stations are the boards' own saved stations, so
+  // this and the dropdown on a board edit the same value (kept on this phone).
+  const settingsEl = document.getElementById("settings");
+  const gearBtn = document.getElementById("gearBtn");
+  const settingSelects = { work: document.getElementById("workStation"), home: document.getElementById("homeStation") };
+  for (const select of Object.values(settingSelects)) {
+    select.innerHTML = COMMON_STATIONS.map((s) => `<option value="${s.id}">${s.name}</option>`).join("");
+  }
+  const openSettings = () => {
+    for (const [mode, select] of Object.entries(settingSelects)) select.value = boardsByMode[mode].getStation();
+    settingsEl.hidden = false;
+    settingSelects.work.focus();
+  };
+  const closeSettings = () => {
+    settingsEl.hidden = true;
+    gearBtn.focus();
+  };
+  gearBtn.addEventListener("click", () => {
+    markActive();
+    openSettings();
+  });
+  document.getElementById("settingsDone").addEventListener("click", closeSettings);
+  document.getElementById("settingsClose").addEventListener("click", closeSettings);
+  settingsEl.addEventListener("click", (e) => {
+    if (e.target === settingsEl) closeSettings();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !settingsEl.hidden) closeSettings();
+  });
+  for (const [mode, select] of Object.entries(settingSelects)) {
+    select.addEventListener("change", () => {
+      markActive();
+      boardsByMode[mode].setStation(select.value);
+    });
+  }
 
   setInterval(() => {
     if (document.hidden) return;

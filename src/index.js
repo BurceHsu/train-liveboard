@@ -46,15 +46,15 @@ const MAIN_CORRIDOR_LINES = new Set(["WL", "WL-C"]); // verified south/north cor
 
 // Only the stations the frontend offers. Every unseen station costs fresh
 // TDX calls, so arbitrary IDs from strangers/bots would burn the quota.
-const ALLOWED_STATIONS = new Set(["0930", "0940", "0960", "0970", "0990", "1000"]);
+const ALLOWED_STATIONS = new Set(["0940", "0970", "0990"]); // 百福, 汐科, 松山
 
 // Which stop each board's riders are heading to, by direction: northbound
-// from the stations south of 百福 -> 百福 (home), southbound from the
-// stations north of 汐科 -> 汐科 (work). Trains that don't appear in that
-// stop's own timetable are flagged, not guessed from train type.
+// from 汐科/松山 -> 百福 (home), southbound from 百福 -> 汐科 (work). Trains
+// that don't appear in that stop's own timetable are flagged, not guessed
+// from train type. Other station/direction pairs get no arrival time.
 const ARRIVAL_TARGETS = {
-  0: { id: "0940", name: "百福", from: new Set(["0960", "0970", "0990", "1000"]) },
-  1: { id: "0970", name: "汐科", from: new Set(["0930", "0940", "0960"]) },
+  0: { id: "0940", name: "百福", from: new Set(["0970", "0990"]) },
+  1: { id: "0970", name: "汐科", from: new Set(["0940"]) },
 };
 
 const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
