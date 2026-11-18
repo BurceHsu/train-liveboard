@@ -416,7 +416,7 @@
     </div>
     <label class="field"><span>上班車站</span><select id="workStation"></select></label>
     <label class="field"><span>下班車站</span><select id="homeStation"></select></label>
-    <p class="settings-note">上班模式從上班車站出發，顯示預計到下班車站的時間；下班模式從下班車站出發，顯示預計到上班車站的時間。方向會依兩站的位置自動選好。設定只存在這支手機裡，不會影響其他家人。</p>
+    <p class="settings-note">上班模式從上班車站出發，顯示預計到下班車站的時間；下班模式從下班車站出發，顯示預計到上班車站的時間。方向會依兩站的位置自動選好。看板上的車站選單可以臨時看別的站，重新打開就會回到這裡設的車站。設定只存在這支手機裡，不會影響其他家人。</p>
     <button type="button" class="refresh-btn" id="settingsDone">完成</button>
   </div>
 </div>
@@ -646,10 +646,11 @@
     `;
   }
 
-  // One `Board` = one station + direction picker, each configured and persisted on its own.
-  // `getTarget` returns the other stop of this commute (the other board's station);
-  // `onStationChange` lets the other board know its target moved.
-  function createBoard({ suffix, defaultStation, defaultDirection, getTarget, onStationChange }) {
+  // One `Board` = one station + direction picker. The station dropdown is only a
+  // temporary look at another stop: it opens on `getDefaultStation()` (the 上班車站 /
+  // 下班車站 setting) and is not remembered. `getTarget` returns the other stop of
+  // this commute, also taken from those settings.
+  function createBoard({ suffix, defaultDirection, getDefaultStation, getTarget }) {
     const el = (id) => document.getElementById(`${id}-${suffix}`);
     const titleEl = el("title");
     const stationSelect = el("stationSelect");
@@ -658,7 +659,6 @@
     const updatedEl = el("updated");
     const moreBtn = el("moreBtn");
 
-    const STORAGE_STATION = `train-liveboard:station:${suffix}`;
     const STORAGE_DIRECTION_PREFIX = `train-liveboard:direction:${suffix}:`;
 
     let allTrains = [];
@@ -729,11 +729,23 @@
         listEl.className = "loading";
         listEl.innerHTML = stateHtml(catFaceSvg(), "查詢中…");
       }
+      // Say who is at fault, so nobody wonders whether their phone is broken.
+      let failureText = "喵嗚…查詢失敗，請稍後再試";
       try {
         const target = getTarget();
         const to = target !== stationId ? `&to=${encodeURIComponent(target)}` : "";
-        const resp = await fetch(`/api/liveboard?station=${encodeURIComponent(stationId)}${to}`);
-        const data = await resp.json();
+        let resp;
+        try {
+          resp = await fetch(`/api/liveboard?station=${encodeURIComponent(stationId)}${to}`);
+        } catch {
+          failureText = "喵嗚…連不上網路，請檢查手機網路後再試";
+          throw new Error("offline");
+        }
+        if (resp.status >= 500) {
+          // The Worker answers 502 when TDX (the data source) fails or is down.
+          failureText = "喵嗚…台鐵資料來源暫時故障，不是網頁壞掉";
+        }
+        const data = resp.ok ? await resp.json() : await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || "查詢失敗");
 
         lastData = data;
@@ -741,25 +753,20 @@
         applyDirection();
       } catch (err) {
         listEl.className = "err";
-        listEl.innerHTML = stateHtml(catFaceSvg({ sad: true }), "喵嗚…查詢失敗，請稍後再試");
+        listEl.innerHTML = stateHtml(catFaceSvg({ sad: true }), failureText);
       }
     }
 
     function populateStations(stations) {
-      const savedStation = storageGet(STORAGE_STATION) || defaultStation;
       stationSelect.innerHTML = stations
         .map((s) => `<option value="${s.id}">${s.name}</option>`)
         .join("");
-
-      const validIds = stations.map((s) => s.id);
-      stationSelect.value = validIds.includes(savedStation) ? savedStation : defaultStation;
+      stationSelect.value = getDefaultStation();
       stationsReady = true;
     }
 
     stationSelect.addEventListener("change", () => {
       markActive();
-      storageSet(STORAGE_STATION, stationSelect.value);
-      onStationChange();
       load({ force: true });
     });
     directionSelect.addEventListener("change", () => {
@@ -773,12 +780,10 @@
 
     return {
       setup: populateStations,
-      getStation: () => stationSelect.value,
       // For the settings sheet, which then calls invalidate() and reloads.
       setStation(id) {
         if (![...stationSelect.options].some((o) => o.value === id)) return;
         stationSelect.value = id;
-        storageSet(STORAGE_STATION, id);
       },
       // Drop what was loaded so the next refresh (even a throttled one) fetches
       // again; a hidden board then loads when its mode is next shown.
@@ -795,12 +800,34 @@
     };
   }
 
-  // Just the three stations the family uses, not the full ~245 TRA stations.
+  // Just the stations the family uses, not the full ~245 TRA stations. The boards'
+  // dropdown offers all of them; the settings sheet only the three that can be
+  // someone's 上班車站 / 下班車站.
   const COMMON_STATIONS = [
+    { id: "0930", name: "七堵" },
     { id: "0940", name: "百福" },
+    { id: "0960", name: "汐止" },
     { id: "0970", name: "汐科" },
     { id: "0990", name: "松山" },
+    { id: "1000", name: "臺北" },
   ];
+  const COMMUTE_STATIONS = COMMON_STATIONS.filter((s) => ["0940", "0970", "0990"].includes(s.id));
+
+  // Each person's 上班車站 / 下班車站, kept on this phone. They are separate from
+  // the boards' dropdowns: the settings decide which station a board opens on and
+  // where the arrival times point; the dropdown is a temporary look elsewhere.
+  const COMMUTE_KEYS = { work: "train-liveboard:commute:work", home: "train-liveboard:commute:home" };
+  // Before the two were split, a board's saved station was the setting.
+  const LEGACY_KEYS = { work: "train-liveboard:station:a", home: "train-liveboard:station:b" };
+  const COMMUTE_DEFAULTS = { work: "0940", home: "0970" };
+  const commute = {};
+  for (const mode of ["work", "home"]) {
+    const isCommuteStation = (id) => COMMUTE_STATIONS.some((s) => s.id === id);
+    const current = storageGet(COMMUTE_KEYS[mode]);
+    const saved = [current, storageGet(LEGACY_KEYS[mode])].find(isCommuteStation);
+    commute[mode] = saved ?? COMMUTE_DEFAULTS[mode];
+    if (saved && saved !== current) storageSet(COMMUTE_KEYS[mode], saved);
+  }
 
   // Only one board is shown (and fetched) at a time: 上班模式 before 14:00
   // Taipei time, 下班模式 from 14:00; the toggle overrides that until the clock
@@ -810,17 +837,15 @@
   const boardsByMode = {
     work: createBoard({
       suffix: "a",
-      defaultStation: "0940",
       defaultDirection: 1,
-      getTarget: () => boardsByMode.home.getStation(),
-      onStationChange: () => boardsByMode.home.invalidate(),
+      getDefaultStation: () => commute.work,
+      getTarget: () => commute.home,
     }),
     home: createBoard({
       suffix: "b",
-      defaultStation: "0970",
       defaultDirection: 0,
-      getTarget: () => boardsByMode.work.getStation(),
-      onStationChange: () => boardsByMode.work.invalidate(),
+      getDefaultStation: () => commute.home,
+      getTarget: () => commute.work,
     }),
   };
   const boardEls = { work: document.getElementById("board-a"), home: document.getElementById("board-b") };
@@ -876,16 +901,16 @@
   Object.values(boardsByMode).forEach((b) => b.setup(COMMON_STATIONS));
   applyMode({ force: true });
 
-  // Settings sheet. The two stations are the boards' own saved stations, so
-  // this and the dropdown on a board edit the same value (kept on this phone).
+  // Settings sheet: the 上班車站 / 下班車站 pair. Changing one also moves that
+  // mode's board onto it, replacing whatever the dropdown was showing.
   const settingsEl = document.getElementById("settings");
   const gearBtn = document.getElementById("gearBtn");
   const settingSelects = { work: document.getElementById("workStation"), home: document.getElementById("homeStation") };
   for (const select of Object.values(settingSelects)) {
-    select.innerHTML = COMMON_STATIONS.map((s) => `<option value="${s.id}">${s.name}</option>`).join("");
+    select.innerHTML = COMMUTE_STATIONS.map((s) => `<option value="${s.id}">${s.name}</option>`).join("");
   }
   const openSettings = () => {
-    for (const [mode, select] of Object.entries(settingSelects)) select.value = boardsByMode[mode].getStation();
+    for (const [mode, select] of Object.entries(settingSelects)) select.value = commute[mode];
     settingsEl.hidden = false;
     settingSelects.work.focus();
   };
@@ -908,6 +933,8 @@
   for (const [mode, select] of Object.entries(settingSelects)) {
     select.addEventListener("change", () => {
       markActive();
+      commute[mode] = select.value;
+      storageSet(COMMUTE_KEYS[mode], select.value);
       boardsByMode[mode].setStation(select.value);
       Object.values(boardsByMode).forEach((b) => b.invalidate()); // each board's target is the other's station
       boardsByMode[currentMode()].forceRefresh();

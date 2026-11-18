@@ -46,7 +46,14 @@ const MAIN_CORRIDOR_LINES = new Set(["WL", "WL-C"]); // verified south/north cor
 
 // Only the stations the frontend offers. Every unseen station costs fresh
 // TDX calls, so arbitrary IDs from strangers/bots would burn the quota.
-const STATION_NAMES = { "0940": "百福", "0970": "汐科", "0990": "松山" };
+const STATION_NAMES = {
+  "0930": "七堵",
+  "0940": "百福",
+  "0960": "汐止",
+  "0970": "汐科",
+  "0990": "松山",
+  "1000": "臺北",
+};
 const ALLOWED_STATIONS = new Set(Object.keys(STATION_NAMES));
 
 // The riders' other stop (`to`) is chosen on the phone: 上班模式 heads for the
@@ -406,5 +413,16 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+
+  // Cron trigger (see wrangler.toml): keeps the TDX token fresh even when nobody
+  // opens the page for a day. getAccessToken only calls TDX once the token has
+  // under 8 hours left, so most runs are just a KV read; inside that window each
+  // run is another chance to renew before the old token expires. Failures are
+  // only logged: the next run (or the next visitor) tries again.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      getAccessToken(env).catch((err) => console.error("token keep-alive failed:", err?.message ?? err))
+    );
   },
 };
