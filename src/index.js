@@ -168,9 +168,13 @@ function taipeiNow() {
 // Never share an in-flight promise between requests: if the request that
 // started it is cancelled (tab closed, page reloaded), it never settles and
 // every later request in that isolate waits on it forever.
-async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
+//
+// TDX data is not trusted as received: `isUsable` says what a sane answer looks
+// like. Anything else counts as a failed request, so it is never cached (and
+// never overwrites the last good copy).
+async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token, isUsable) {
   const cached = await env.TOKEN_KV.get(cacheKey, { type: "json" });
-  if (cached) return cached;
+  if (cached && isUsable(cached)) return cached;
 
   const staleKey = `${cacheKey}:stale`;
   try {
@@ -180,15 +184,32 @@ async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
     });
     if (!resp.ok) throw new Error(`TDX request failed (${cacheKey}): ${resp.status}`);
     const data = await resp.json();
+    if (!isUsable(data)) {
+      throw new Error(`TDX sent unusable data (${cacheKey}): ${JSON.stringify(data).slice(0, 160)}`);
+    }
     await env.TOKEN_KV.put(cacheKey, JSON.stringify(data), { expirationTtl: ttlSeconds });
     await env.TOKEN_KV.put(staleKey, JSON.stringify(data));
     return data;
   } catch (err) {
     const stale = await env.TOKEN_KV.get(staleKey, { type: "json" });
-    if (stale) return stale;
+    if (stale && isUsable(stale)) {
+      // The page looks normal when this happens, so leave a trace.
+      console.warn(`serving the stale copy of ${cacheKey}: ${err?.message ?? err}`);
+      return stale;
+    }
     throw err;
   }
 }
+
+// What a usable answer looks like. The station lists and a station's timetable
+// for a day are never empty; the live board is (late at night, for instance).
+const isList = (data) => Array.isArray(data);
+const isNonEmptyList = (data) => Array.isArray(data) && data.length > 0;
+const isTimetableRow = (t) =>
+  typeof t?.TrainNo === "string" &&
+  /^\d{1,2}:\d{2}/.test(t.DepartureTime ?? "") &&
+  (t.Direction === 0 || t.Direction === 1);
+const isTimetable = (data) => Array.isArray(data) && data.some(isTimetableRow);
 
 async function getStations(env, token) {
   return fetchJsonCached(
@@ -196,7 +217,8 @@ async function getStations(env, token) {
     "stations",
     STATIC_DATA_TTL,
     `${TDX_BASE}/Station?$format=JSON`,
-    token
+    token,
+    isNonEmptyList
   );
 }
 
@@ -211,7 +233,8 @@ async function getStationLineMap(env, token) {
     "station_of_line",
     STATIC_DATA_TTL,
     `${TDX_BASE}/StationOfLine?$format=JSON`,
-    token
+    token,
+    isNonEmptyList
   );
 
   const map = new Map();
@@ -250,7 +273,8 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
       `daily_${dateStr}_${id}`,
       DAILY_TIMETABLE_TTL,
       `${TDX_BASE}/DailyTimetable/Station/${id}/${dateStr}?$format=JSON`,
-      token
+      token,
+      isTimetable
     );
 
   const arrivalDirection = target && target !== stationId ? (target > stationId ? 1 : 0) : null;
@@ -260,7 +284,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
     if (arrivalDirection === null) return null;
     const rows = await getDaily(target).catch(() => null);
     // Unfiltered on purpose: a train that ends at the target still gets you there.
-    return rows && new Map(rows.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]));
+    return rows && new Map(rows.filter(isTimetableRow).map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]));
   };
 
   const [dailyAll, live, stationLineMap, arrivalTimes] = await Promise.all([
@@ -270,7 +294,8 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
       `live_${stationId}`,
       LIVEBOARD_TTL,
       `${TDX_BASE}/LiveBoard/Station/${stationId}?$format=JSON`,
-      token
+      token,
+      isList
     ),
     getStationLineMap(env, token),
     loadArrivalTimes(),
@@ -279,18 +304,34 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
   // Trains whose last stop is this station can't be boarded here. TDX has also
   // returned a whole day's timetable with every train listed three times, byte
   // for byte (2026-11-26), so keep only the first of each train.
+  // Rows missing a train number, time or direction are skipped too, so one bad
+  // row can't take down the whole board.
   const seen = new Set();
+  let repeated = 0;
+  let unusable = 0;
   const daily = dailyAll.filter((t) => {
+    if (!isTimetableRow(t)) {
+      unusable++;
+      return false;
+    }
     if (t.EndingStationID === stationId) return false;
     const key = `${t.TrainNo}|${t.Direction}|${t.DepartureTime}`;
-    if (seen.has(key)) return false;
+    if (seen.has(key)) {
+      repeated++;
+      return false;
+    }
     seen.add(key);
     return true;
   });
+  if (repeated || unusable) {
+    console.warn(
+      `data anomaly: station ${stationId} timetable for ${dateStr} had ${repeated} repeated and ${unusable} unusable rows`
+    );
+  }
 
   const liveByTrainNo = new Map();
   for (const t of live) {
-    liveByTrainNo.set(t.TrainNo, t.DelayTime > 0 ? t.DelayTime : 0);
+    if (t?.TrainNo) liveByTrainNo.set(t.TrainNo, t.DelayTime > 0 ? t.DelayTime : 0);
   }
 
   const onCorridor = isMainCorridor(stationLineMap, stationId);
@@ -378,7 +419,7 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
 
   return {
     stationId,
-    stationName: dailyAll[0]?.StationName?.Zh_tw ?? "",
+    stationName: dailyAll.find((t) => t?.StationName)?.StationName.Zh_tw ?? STATION_NAMES[stationId],
     onCorridor,
     directionOptions,
     updateTime: live[0]?.UpdateTime ?? null,

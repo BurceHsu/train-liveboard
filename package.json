@@ -2,12 +2,16 @@
   "name": "train-liveboard",
   "private": true,
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:staging": "wrangler deploy --env staging",
-    "tail": "wrangler tail",
-    "tail:staging": "wrangler tail --env staging"
+    "dev": "npx wrangler dev",
+    "test": "node --test test/*.test.mjs",
+    "predeploy": "npm test",
+    "deploy": "npx wrangler deploy",
+    "predeploy:staging": "npm test",
+    "deploy:staging": "npx wrangler deploy --env staging",
+    "tail": "npx wrangler tail",
+    "tail:staging": "npx wrangler tail --env staging"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

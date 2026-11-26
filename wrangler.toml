@@ -15,6 +15,11 @@ id = "1565511287804e53a9e7891055ac5cae"
 [triggers]
 crons = ["0 */2 * * *"]
 
+# Keep logs (errors and "data anomaly" warnings) in the Cloudflare dashboard:
+# Workers & Pages > train-liveboard > Logs. Free plan: kept for 3 days.
+[observability]
+enabled = true
+
 # Staging: a separate Worker (different workers.dev URL), its own KV
 # namespace so staging's cache never touches production's, and its own
 # secrets (set separately with `wrangler secret put <NAME> --env staging`).
@@ -27,3 +32,6 @@ id = "b053a6ff7eff467086d6423b65be1a03"
 
 [env.staging.triggers]
 crons = ["0 */2 * * *"]
+
+[env.staging.observability]
+enabled = true

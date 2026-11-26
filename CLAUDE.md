@@ -9,8 +9,19 @@ frontend. Used by Bruce's whole family (added to their phone home screens).
   Production is live and in daily use by family — don't deploy straight to it.
   - `npm run deploy:staging` → https://train-liveboard-staging.bruce-hsu.workers.dev
   - `npm run deploy` → https://train-liveboard.bruce-hsu.workers.dev
+- Deploy with those npm scripts, not `wrangler deploy` directly: they run `npm test`
+  first and stop if a test fails.
 - Staging has its own KV namespace and its own copy of the TDX secrets (`[env.staging]`
   in `wrangler.toml`), fully separate from production.
+
+## Don't trust TDX data
+
+TDX has sent a day's timetable with every train three times (2026-11-26). The Worker
+checks each answer before caching it (`isUsable` in `fetchJsonCached`), drops repeated
+or incomplete rows, and logs `data anomaly` / `serving the stale copy` warnings (kept
+in Cloudflare Workers Logs, 3 days on the free plan). When TDX misbehaves in a new way,
+add a test for it in `test/worker.test.mjs`. After a TDX outage, look at real data on
+the page before calling it fixed.
 
 ## TDX API quota
 
