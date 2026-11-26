@@ -36,7 +36,11 @@
 // the board to know yet) are marked as "no live data yet", not as on-time.
 //
 // TDX free-tier quota is tight (5 calls/min, ~4,500 calls/month per key), so
-// every upstream call result is cached in KV and reused across all viewers.
+// every upstream call result is cached in KV and reused across all viewers:
+//   - timetables are fetched ahead of time by the cron trigger, one station per
+//     run, so switching stations normally costs no timetable call at all;
+//   - the live board is optional: without it the page shows scheduled times;
+//   - after TDX answers 429 nobody asks again for a while.
 
 const TDX_TOKEN_URL =
   "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token";
@@ -64,8 +68,22 @@ const ALLOWED_STATIONS = new Set(Object.keys(STATION_NAMES));
 // guessed from train type; trains going the other way get no arrival time.
 
 const LIVEBOARD_TTL = 180; // 3 min: matches the frontend's refresh interval
-const DAILY_TIMETABLE_TTL = 1800; // 30 min: a day's schedule barely changes
+const LIVEBOARD_STALE_LIMIT = 900; // 15 min: older delay data is worse than none
 const STATIC_DATA_TTL = 86400; // 1 day: station/line lists are effectively static
+
+// A station's timetable for the day stays usable all day. The cron trigger
+// fetches it after midnight and again every 3 hours between 05:00 and 22:00
+// (suspensions can change), about 7 calls per station per day. A visitor only
+// fetches one that is missing, or that the cron has left for 6 hours.
+const TIMETABLE_KEEP = 2 * 86400;
+const TIMETABLE_REFRESH_AGE = 3 * 60 * 60 * 1000;
+const TIMETABLE_MAX_AGE = 6 * 60 * 60 * 1000;
+const REFRESH_FROM_MINUTE = 5 * 60;
+const REFRESH_UNTIL_MINUTE = 22 * 60;
+const CRON_INTERVAL_MS = 5 * 60 * 1000; // keep in step with wrangler.toml
+const PREFETCH_ORDER = ["0940", "0970", "0990", "0930", "0960", "1000"];
+
+const COOLDOWN_KEY = "tdx_cooldown_until";
 
 // TDX sometimes answers the token request with 429 when called from
 // Cloudflare (not from a laptop), for minutes at a time, so retry briefly.
@@ -161,43 +179,172 @@ function taipeiNow() {
   };
 }
 
-// Cache TDX responses in KV so many viewers (and many stations) share the
-// same upstream calls instead of each triggering a fresh one. A second,
-// non-expiring "stale" copy is kept as a fallback: if TDX is down or we hit
-// the rate limit, we serve slightly-old data instead of breaking the page.
+// TDX answered 429 (or did moments ago): our own calls used up the allowance.
+class TdxBusy extends Error {}
+
+// Remember a 429 so that taps on 重新查詢 don't keep hammering TDX. KV makes
+// this best effort (other locations may see it late), which is good enough.
+async function startCooldown(env, resp) {
+  const asked = Number(resp.headers.get("retry-after") ?? resp.headers.get("ratelimit-reset"));
+  const seconds = asked > 0 ? Math.min(asked, 60) : 60;
+  await env.TOKEN_KV.put(COOLDOWN_KEY, JSON.stringify(Date.now() + seconds * 1000), {
+    expirationTtl: 60, // KV's minimum
+  }).catch(() => {}); // many requests writing at once: one of them is enough
+}
+
+// The only way data is requested from TDX. `getToken` is called only when a
+// request is really going out, so cached boards keep working while TDX's login
+// server is down. TDX data is not trusted as received: `isUsable` says what a
+// sane answer looks like, and anything else counts as a failed request.
+async function fetchTdx(env, getToken, url, label, isUsable) {
+  const blockedUntil = await env.TOKEN_KV.get(COOLDOWN_KEY, { type: "json" });
+  if (blockedUntil > Date.now()) throw new TdxBusy(`waiting out TDX's rate limit, not asking for ${label}`);
+
+  const resp = await fetch(url, {
+    headers: { authorization: `Bearer ${await getToken()}` },
+    signal: AbortSignal.timeout(DATA_REQUEST_TIMEOUT_MS),
+  });
+  if (resp.status === 429) {
+    await startCooldown(env, resp);
+    throw new TdxBusy(`TDX request failed (${label}): 429`);
+  }
+  if (!resp.ok) throw new Error(`TDX request failed (${label}): ${resp.status}`);
+  const data = await resp.json();
+  if (!isUsable(data)) {
+    throw new Error(`TDX sent unusable data (${label}): ${JSON.stringify(data).slice(0, 160)}`);
+  }
+  return data;
+}
+
+// Caching rules for all three kinds of data: share one copy between all
+// viewers, never overwrite a good copy with a bad answer, and leave a warning
+// behind whenever an old copy is served (the page looks normal when it is).
 // Never share an in-flight promise between requests: if the request that
 // started it is cancelled (tab closed, page reloaded), it never settles and
 // every later request in that isolate waits on it forever.
-//
-// TDX data is not trusted as received: `isUsable` says what a sane answer looks
-// like. Anything else counts as a failed request, so it is never cached (and
-// never overwrites the last good copy).
-async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token, isUsable) {
+
+// Station and line lists: a non-expiring second copy backs up the daily one.
+async function fetchStaticCached(env, getToken, cacheKey, url) {
   const cached = await env.TOKEN_KV.get(cacheKey, { type: "json" });
-  if (cached && isUsable(cached)) return cached;
+  if (cached && isNonEmptyList(cached)) return cached;
 
   const staleKey = `${cacheKey}:stale`;
   try {
-    const resp = await fetch(url, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(DATA_REQUEST_TIMEOUT_MS),
-    });
-    if (!resp.ok) throw new Error(`TDX request failed (${cacheKey}): ${resp.status}`);
-    const data = await resp.json();
-    if (!isUsable(data)) {
-      throw new Error(`TDX sent unusable data (${cacheKey}): ${JSON.stringify(data).slice(0, 160)}`);
-    }
-    await env.TOKEN_KV.put(cacheKey, JSON.stringify(data), { expirationTtl: ttlSeconds });
+    const data = await fetchTdx(env, getToken, url, cacheKey, isNonEmptyList);
+    await env.TOKEN_KV.put(cacheKey, JSON.stringify(data), { expirationTtl: STATIC_DATA_TTL });
     await env.TOKEN_KV.put(staleKey, JSON.stringify(data));
     return data;
   } catch (err) {
     const stale = await env.TOKEN_KV.get(staleKey, { type: "json" });
-    if (stale && isUsable(stale)) {
-      // The page looks normal when this happens, so leave a trace.
+    if (stale && isNonEmptyList(stale)) {
       console.warn(`serving the stale copy of ${cacheKey}: ${err?.message ?? err}`);
       return stale;
     }
     throw err;
+  }
+}
+
+const timetableKey = (date, stationId) => `timetable_${date}_${stationId}`;
+
+// Cleans a timetable before it is cached. TDX has returned a whole day with
+// every train listed three times, byte for byte (2026-11-26), so only the first
+// of each train is kept; rows missing a train number, time or direction are
+// dropped so one bad row can't take down the board. Only the fields the board
+// uses are stored: the full answer (500 KB for 臺北) cost more CPU time to read
+// on every request than the free plan's 10 ms allows.
+function cleanTimetable(data, stationId, date) {
+  const seen = new Set();
+  const rows = [];
+  let repeated = 0;
+  let unusable = 0;
+  for (const t of data) {
+    if (!isTimetableRow(t)) {
+      unusable++;
+      continue;
+    }
+    const key = `${t.TrainNo}|${t.Direction}|${t.DepartureTime}`;
+    if (seen.has(key)) {
+      repeated++;
+      continue;
+    }
+    seen.add(key);
+    rows.push({
+      TrainNo: t.TrainNo,
+      Direction: t.Direction,
+      DepartureTime: t.DepartureTime,
+      ArrivalTime: t.ArrivalTime,
+      SuspendedFlag: t.SuspendedFlag,
+      EndingStationID: t.EndingStationID,
+      EndingStationName: { Zh_tw: t.EndingStationName?.Zh_tw },
+      TrainTypeName: { Zh_tw: t.TrainTypeName?.Zh_tw },
+      StationName: { Zh_tw: t.StationName?.Zh_tw },
+    });
+  }
+  if (repeated || unusable) {
+    console.warn(
+      `data anomaly: station ${stationId} timetable for ${date} had ${repeated} repeated and ${unusable} unusable rows`
+    );
+  }
+  return rows;
+}
+
+async function fetchTimetable(env, getToken, stationId, date) {
+  const key = timetableKey(date, stationId);
+  const data = await fetchTdx(
+    env,
+    getToken,
+    `${TDX_BASE}/DailyTimetable/Station/${stationId}/${date}?$format=JSON`,
+    key,
+    isTimetable
+  );
+  const rows = cleanTimetable(data, stationId, date);
+  const fetchedAt = Date.now();
+  // The time is repeated as metadata so the cron can check ages without reading
+  // (and parsing) every timetable.
+  await env.TOKEN_KV.put(key, JSON.stringify({ fetchedAt, rows }), {
+    expirationTtl: TIMETABLE_KEEP,
+    metadata: { fetchedAt },
+  });
+  return rows;
+}
+
+async function getTimetable(env, getToken, stationId, date) {
+  const key = timetableKey(date, stationId);
+  const copy = await env.TOKEN_KV.get(key, { type: "json" });
+  const usable = !!copy && isTimetable(copy.rows);
+  if (usable && Date.now() - copy.fetchedAt < TIMETABLE_MAX_AGE) return copy.rows;
+
+  try {
+    return await fetchTimetable(env, getToken, stationId, date);
+  } catch (err) {
+    if (!usable) throw err;
+    console.warn(`serving the stale copy of ${key}: ${err?.message ?? err}`);
+    return copy.rows;
+  }
+}
+
+// Delay information. Never fails the board: with nothing recent to show it
+// returns `available: false` and the page says the times are scheduled ones.
+async function getLiveBoard(env, getToken, stationId) {
+  const key = `liveboard_${stationId}`;
+  const copy = await env.TOKEN_KV.get(key, { type: "json" });
+  const age = copy && isList(copy.rows) ? Date.now() - copy.fetchedAt : Infinity;
+  if (age < LIVEBOARD_TTL * 1000) return { rows: copy.rows, available: true };
+
+  try {
+    const url = `${TDX_BASE}/LiveBoard/Station/${stationId}?$format=JSON`;
+    const rows = await fetchTdx(env, getToken, url, key, isList);
+    await env.TOKEN_KV.put(key, JSON.stringify({ fetchedAt: Date.now(), rows }), {
+      expirationTtl: LIVEBOARD_STALE_LIMIT,
+    });
+    return { rows, available: true };
+  } catch (err) {
+    if (age < LIVEBOARD_STALE_LIMIT * 1000) {
+      console.warn(`serving the stale copy of ${key}: ${err?.message ?? err}`);
+      return { rows: copy.rows, available: true };
+    }
+    console.warn(`no live data for ${stationId}: ${err?.message ?? err}`);
+    return { rows: [], available: false };
   }
 }
 
@@ -211,30 +358,21 @@ const isTimetableRow = (t) =>
   (t.Direction === 0 || t.Direction === 1);
 const isTimetable = (data) => Array.isArray(data) && data.some(isTimetableRow);
 
-async function getStations(env, token) {
-  return fetchJsonCached(
-    env,
-    "stations",
-    STATIC_DATA_TTL,
-    `${TDX_BASE}/Station?$format=JSON`,
-    token,
-    isNonEmptyList
-  );
+async function getStations(env, getToken) {
+  return fetchStaticCached(env, getToken, "stations", `${TDX_BASE}/Station?$format=JSON`);
 }
 
 // Map of StationID -> Set of LineIDs it belongs to, built from TDX's own
 // line/station-of-line data (not a hand-written list).
-async function getStationLineMap(env, token) {
+async function getStationLineMap(env, getToken) {
   const cached = await env.TOKEN_KV.get("station_line_map", { type: "json" });
   if (cached) return new Map(cached.map(([id, lines]) => [id, new Set(lines)]));
 
-  const stationsOfLine = await fetchJsonCached(
+  const stationsOfLine = await fetchStaticCached(
     env,
+    getToken,
     "station_of_line",
-    STATIC_DATA_TTL,
-    `${TDX_BASE}/StationOfLine?$format=JSON`,
-    token,
-    isNonEmptyList
+    `${TDX_BASE}/StationOfLine?$format=JSON`
   );
 
   const map = new Map();
@@ -254,6 +392,12 @@ async function getStationLineMap(env, token) {
   return map;
 }
 
+// The token for one request (or cron run): looked up at most once.
+function tokenGetter(env) {
+  let pending;
+  return () => (pending ??= getAccessToken(env));
+}
+
 function isMainCorridor(stationLineMap, stationId) {
   const lines = stationLineMap.get(stationId);
   if (!lines) return false;
@@ -264,18 +408,13 @@ function isMainCorridor(stationLineMap, stationId) {
 }
 
 async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, target } = {}) {
-  const token = await getAccessToken(env);
+  const getToken = tokenGetter(env);
   const { nowMinutes, dateStr } = taipeiNow();
+  const getDaily = (id) => getTimetable(env, getToken, id, dateStr);
 
-  const getDaily = (id) =>
-    fetchJsonCached(
-      env,
-      `daily_${dateStr}_${id}`,
-      DAILY_TIMETABLE_TTL,
-      `${TDX_BASE}/DailyTimetable/Station/${id}/${dateStr}?$format=JSON`,
-      token,
-      isTimetable
-    );
+  // The timetable is the one thing the board can't do without, so it gets the
+  // first go at TDX's per-minute allowance.
+  const dailyAll = await getDaily(stationId);
 
   const arrivalDirection = target && target !== stationId ? (target > stationId ? 1 : 0) : null;
   // Nice-to-have: if the target's timetable can't be fetched, the board still
@@ -284,53 +423,20 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
     if (arrivalDirection === null) return null;
     const rows = await getDaily(target).catch(() => null);
     // Unfiltered on purpose: a train that ends at the target still gets you there.
-    return rows && new Map(rows.filter(isTimetableRow).map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]));
+    return rows && new Map(rows.map((t) => [t.TrainNo, t.ArrivalTime || t.DepartureTime]));
   };
 
-  const [dailyAll, live, stationLineMap, arrivalTimes] = await Promise.all([
-    getDaily(stationId),
-    fetchJsonCached(
-      env,
-      `live_${stationId}`,
-      LIVEBOARD_TTL,
-      `${TDX_BASE}/LiveBoard/Station/${stationId}?$format=JSON`,
-      token,
-      isList
-    ),
-    getStationLineMap(env, token),
+  const [live, stationLineMap, arrivalTimes] = await Promise.all([
+    getLiveBoard(env, getToken, stationId),
+    getStationLineMap(env, getToken),
     loadArrivalTimes(),
   ]);
 
-  // Trains whose last stop is this station can't be boarded here. TDX has also
-  // returned a whole day's timetable with every train listed three times, byte
-  // for byte (2026-11-26), so keep only the first of each train.
-  // Rows missing a train number, time or direction are skipped too, so one bad
-  // row can't take down the whole board.
-  const seen = new Set();
-  let repeated = 0;
-  let unusable = 0;
-  const daily = dailyAll.filter((t) => {
-    if (!isTimetableRow(t)) {
-      unusable++;
-      return false;
-    }
-    if (t.EndingStationID === stationId) return false;
-    const key = `${t.TrainNo}|${t.Direction}|${t.DepartureTime}`;
-    if (seen.has(key)) {
-      repeated++;
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-  if (repeated || unusable) {
-    console.warn(
-      `data anomaly: station ${stationId} timetable for ${dateStr} had ${repeated} repeated and ${unusable} unusable rows`
-    );
-  }
+  // Trains whose last stop is this station can't be boarded here.
+  const daily = dailyAll.filter((t) => t.EndingStationID !== stationId);
 
   const liveByTrainNo = new Map();
-  for (const t of live) {
+  for (const t of live.rows) {
     if (t?.TrainNo) liveByTrainNo.set(t.TrainNo, t.DelayTime > 0 ? t.DelayTime : 0);
   }
 
@@ -419,19 +525,20 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
 
   return {
     stationId,
-    stationName: dailyAll.find((t) => t?.StationName)?.StationName.Zh_tw ?? STATION_NAMES[stationId],
+    stationName: dailyAll[0]?.StationName?.Zh_tw ?? STATION_NAMES[stationId],
     onCorridor,
     directionOptions,
-    updateTime: live[0]?.UpdateTime ?? null,
+    updateTime: live.rows[0]?.UpdateTime ?? null,
+    liveAvailable: live.available, // false: no delay information right now
     trains,
   };
 }
 
 async function handleStations(env) {
-  const token = await getAccessToken(env);
+  const getToken = tokenGetter(env);
   const [stations, stationLineMap] = await Promise.all([
-    getStations(env, token),
-    getStationLineMap(env, token),
+    getStations(env, getToken),
+    getStationLineMap(env, getToken),
   ]);
 
   const list = stations.map((s) => ({
@@ -442,6 +549,42 @@ async function handleStations(env) {
   }));
 
   return Response.json({ stations: list });
+}
+
+// Fetches (or refreshes) one timetable. One station per cron run keeps the
+// cron's share of the per-minute allowance small.
+async function refreshOneTimetable(env, getToken) {
+  const { nowMinutes, dateStr } = taipeiNow();
+  const { keys } = await env.TOKEN_KV.list({ prefix: `timetable_${dateStr}_` });
+  const fetchedAt = new Map(keys.map((k) => [k.name, k.metadata?.fetchedAt ?? 0]));
+  const missing = PREFETCH_ORDER.filter((id) => !fetchedAt.has(timetableKey(dateStr, id)));
+  const mayRefresh = nowMinutes >= REFRESH_FROM_MINUTE && nowMinutes < REFRESH_UNTIL_MINUTE;
+  const old = mayRefresh
+    ? PREFETCH_ORDER.filter(
+        (id) => Date.now() - fetchedAt.get(timetableKey(dateStr, id)) >= TIMETABLE_REFRESH_AGE
+      )
+    : [];
+  const due = missing.length ? missing : old;
+  if (due.length === 0) return;
+
+  // Take turns, so one station that keeps failing can't block the others.
+  const stationId = due[Math.floor(Date.now() / CRON_INTERVAL_MS) % due.length];
+  await fetchTimetable(env, getToken, stationId, dateStr);
+  console.log(`prefetched the ${dateStr} timetable of ${stationId}`);
+}
+
+// Keeps the token fresh and the timetables ready. getAccessToken only calls TDX
+// once the token has under 8 hours left, so most runs cost no token request.
+// Staging sets PREFETCH to "off": it uses the same API key, so its prefetching
+// would spend production's quota.
+async function runScheduled(env) {
+  try {
+    const token = await getAccessToken(env);
+    if (env.PREFETCH !== "off") await refreshOneTimetable(env, async () => token);
+  } catch (err) {
+    // Only logged: the next run (or the next visitor) tries again.
+    console.error("scheduled run failed:", err?.message ?? err);
+  }
 }
 
 export default {
@@ -479,24 +622,18 @@ export default {
         return Response.json(data);
       } catch (err) {
         console.error(`liveboard ${stationId} failed:`, err?.message ?? err);
-        return Response.json(
-          { error: "查詢台鐵即時資料失敗，請稍後再試。" },
-          { status: 502 }
-        );
+        // `reason` lets the page tell "we asked too often" from "TDX is broken".
+        return err instanceof TdxBusy
+          ? Response.json({ error: "查詢太頻繁，請等一分鐘再試。", reason: "busy" }, { status: 503 })
+          : Response.json({ error: "查詢台鐵即時資料失敗，請稍後再試。", reason: "source" }, { status: 502 });
       }
     }
 
     return env.ASSETS.fetch(request);
   },
 
-  // Cron trigger (see wrangler.toml): keeps the TDX token fresh even when nobody
-  // opens the page for a day. getAccessToken only calls TDX once the token has
-  // under 8 hours left, so most runs are just a KV read; inside that window each
-  // run is another chance to renew before the old token expires. Failures are
-  // only logged: the next run (or the next visitor) tries again.
+  // Cron trigger (see wrangler.toml).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      getAccessToken(env).catch((err) => console.error("token keep-alive failed:", err?.message ?? err))
-    );
+    ctx.waitUntil(runScheduled(env));
   },
 };

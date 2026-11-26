@@ -28,8 +28,23 @@ the page before calling it fixed.
 The TDX (運輸資料流通服務平台) API key in use is on the **free tier**: 5 requests/min,
 ~4,500 requests/month. This is tight. Any change that increases how often the Worker
 calls TDX (shorter cache TTLs, more frequent frontend polling, more stations queried)
-should be weighed against this budget. Current caching: live board 3 min, daily
-timetable 30 min, station/line lists 1 day, all in KV (`src/index.js`).
+should be weighed against this budget — **both** limits: the per-minute one is what a
+person switching between stations runs into (that broke the page on 2026-11-26).
+
+How the Worker stays inside it (`src/index.js`, everything cached in KV):
+
+- Timetables: the 5-minute cron fetches one station per run, after midnight and every
+  3 hours from 05:00 to 22:00 (about 42 calls/day, ~1,260/month for six stations). A
+  visitor only fetches one that is missing or 6 hours old.
+- Live board: 3 min cache; a copy up to 15 min old covers failures; otherwise the page
+  shows scheduled times and says so. It must never fail the whole board.
+- After a 429 no data is requested until TDX's pause is over; the page says 查詢太頻繁,
+  not that TDX is broken.
+- Station/line lists: 1 day.
+- Staging shares the API key, so it does not prefetch (`PREFETCH = "off"`), and heavy
+  testing there can rate-limit production for a minute.
+
+Adding a station adds about 210 prefetch calls a month.
 
 ## Direction field correctness
 

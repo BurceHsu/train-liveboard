@@ -10,10 +10,12 @@ binding = "ASSETS"
 binding = "TOKEN_KV"
 id = "1565511287804e53a9e7891055ac5cae"
 
-# Every 2 hours (UTC), keep the TDX token from expiring while nobody is using the
-# page. Triggers are not inherited by [env.staging], so it has its own below.
+# Every 5 minutes: keep the TDX token from expiring and fetch one station's
+# timetable ahead of time if one is due (most runs call TDX zero times). Keep in
+# step with CRON_INTERVAL_MS in src/index.js. Triggers are not inherited by
+# [env.staging], so it has its own below.
 [triggers]
-crons = ["0 */2 * * *"]
+crons = ["*/5 * * * *"]
 
 # Keep logs (errors and "data anomaly" warnings) in the Cloudflare dashboard:
 # Workers & Pages > train-liveboard > Logs. Free plan: kept for 3 days.
@@ -30,8 +32,13 @@ name = "train-liveboard-staging"
 binding = "TOKEN_KV"
 id = "b053a6ff7eff467086d6423b65be1a03"
 
+# Staging only keeps its token alive: it shares the API key, so prefetching
+# there would spend production's quota.
 [env.staging.triggers]
 crons = ["0 */2 * * *"]
+
+[env.staging.vars]
+PREFETCH = "off"
 
 [env.staging.observability]
 enabled = true

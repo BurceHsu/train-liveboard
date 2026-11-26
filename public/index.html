@@ -188,6 +188,7 @@
     font-size: 11px;
     margin: 2px 0 4px;
   }
+  .updated.warn { color: var(--delay); }
   .disclaimer {
     text-align: center;
     color: var(--muted);
@@ -666,6 +667,25 @@
     let lastData = null;
     let stationsReady = false;
     let lastLoadAt = 0;
+    let loadSeq = 0; // only the newest request may touch the screen
+
+    // The small line under the list: when the delay data is from, or that there
+    // is none and the times shown are the scheduled ones.
+    function showStatus(suffix = "") {
+      const noDelayData = lastData?.liveAvailable === false;
+      updatedEl.classList.toggle("warn", noDelayData);
+      const text = noDelayData ? "目前拿不到誤點資訊，顯示的是表定時間" : fmtUpdateTime(lastData?.updateTime);
+      updatedEl.textContent = text + suffix;
+    }
+
+    // Nothing on screen may be left over from an earlier station.
+    function clearResult() {
+      lastData = null;
+      allTrains = [];
+      showAll = false;
+      moreBtn.style.display = "none";
+      showStatus();
+    }
 
     function renderList() {
       const visible = showAll ? allTrains : allTrains.slice(0, DEFAULT_COUNT);
@@ -712,7 +732,7 @@
       allTrains = (lastData.trains || []).filter((t) => t.direction === selectedDirection);
       showAll = false;
       renderList();
-      updatedEl.textContent = fmtUpdateTime(lastData.updateTime);
+      showStatus();
     }
 
     async function load({ force = false } = {}) {
@@ -721,11 +741,13 @@
       if (!stationId) return;
       if (!force && Date.now() - lastLoadAt < MIN_LOAD_GAP_MS) return;
       lastLoadAt = Date.now();
+      const seq = ++loadSeq;
 
       // Background auto-refreshes keep the current list instead of making it
       // jump to a loading state every 3 minutes.
       if (force || !lastData || lastData.stationId !== stationId) {
         if (lastData?.stationId !== stationId) titleEl.textContent = `${stationSelect.selectedOptions[0]?.text ?? ""}站`;
+        clearResult();
         listEl.className = "loading";
         listEl.innerHTML = stateHtml(catFaceSvg(), "查詢中…");
       }
@@ -741,17 +763,25 @@
           failureText = "喵嗚…連不上網路，請檢查手機網路後再試";
           throw new Error("offline");
         }
-        if (resp.status >= 500) {
-          // The Worker answers 502 when TDX (the data source) fails or is down.
-          failureText = "喵嗚…台鐵資料來源暫時故障，不是網頁壞掉";
-        }
         const data = resp.ok ? await resp.json() : await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.error || "查詢失敗");
+        if (!resp.ok) {
+          if (data.reason === "busy") {
+            // We used up TDX's per-minute allowance; the data source is fine.
+            failureText = "喵嗚…查詢太頻繁了，請等一分鐘再試";
+          } else if (resp.status >= 500) {
+            // The Worker answers 502 when TDX (the data source) fails or is down.
+            failureText = "喵嗚…台鐵資料來源暫時故障，不是網頁壞掉";
+          }
+          throw new Error(data.error || "查詢失敗");
+        }
+        if (seq !== loadSeq) return; // a newer choice was made while waiting
 
         lastData = data;
         populateDirections(stationId, data.directionOptions);
         applyDirection();
       } catch (err) {
+        if (seq !== loadSeq) return;
+        clearResult();
         listEl.className = "err";
         listEl.innerHTML = stateHtml(catFaceSvg({ sad: true }), failureText);
       }
@@ -788,6 +818,7 @@
       // Drop what was loaded so the next refresh (even a throttled one) fetches
       // again; a hidden board then loads when its mode is next shown.
       invalidate() {
+        loadSeq++; // a request already on its way answers the old question
         lastData = null;
         lastLoadAt = 0;
       },
@@ -795,7 +826,7 @@
       forceRefresh: () => load({ force: true }),
       showPaused() {
         if (!lastData) return;
-        updatedEl.textContent = `${fmtUpdateTime(lastData.updateTime)} · 已暫停自動更新，請按「重新查詢」`;
+        showStatus(" · 已暫停自動更新，請按「重新查詢」");
       },
     };
   }
