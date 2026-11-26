@@ -69,19 +69,40 @@ const STATIC_DATA_TTL = 86400; // 1 day: station/line lists are effectively stat
 
 // TDX sometimes answers the token request with 429 when called from
 // Cloudflare (not from a laptop), for minutes at a time, so retry briefly.
+//
+// When TDX's login server is down it can also be very slow to answer (up to
+// 30 s was seen), which left the family staring at "查詢中…". So every attempt
+// has a time limit and all attempts together share one budget.
+const TOKEN_ATTEMPT_TIMEOUT_MS = 5000;
+const TOKEN_TOTAL_BUDGET_MS = 9000;
+const DATA_REQUEST_TIMEOUT_MS = 8000;
+
 async function requestToken(env, attempts) {
+  const startedAt = Date.now();
   let failure;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 700));
-    const resp = await fetch(TDX_TOKEN_URL, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: env.TDX_CLIENT_ID,
-        client_secret: env.TDX_CLIENT_SECRET,
-      }),
-    });
+    if (attempt > 0) {
+      const wait = attempt * 700;
+      if (Date.now() - startedAt + wait >= TOKEN_TOTAL_BUDGET_MS) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    const timeout = Math.min(TOKEN_ATTEMPT_TIMEOUT_MS, TOKEN_TOTAL_BUDGET_MS - (Date.now() - startedAt));
+    let resp;
+    try {
+      resp = await fetch(TDX_TOKEN_URL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: env.TDX_CLIENT_ID,
+          client_secret: env.TDX_CLIENT_SECRET,
+        }),
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch (err) {
+      failure = new Error(`TDX token request did not answer: ${err?.name ?? err}`);
+      continue; // too slow or the connection dropped: worth another try
+    }
     if (resp.ok) return resp.json();
 
     const detail = (await resp.text().catch(() => "")).slice(0, 160);
@@ -153,7 +174,10 @@ async function fetchJsonCached(env, cacheKey, ttlSeconds, url, token) {
 
   const staleKey = `${cacheKey}:stale`;
   try {
-    const resp = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+    const resp = await fetch(url, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(DATA_REQUEST_TIMEOUT_MS),
+    });
     if (!resp.ok) throw new Error(`TDX request failed (${cacheKey}): ${resp.status}`);
     const data = await resp.json();
     await env.TOKEN_KV.put(cacheKey, JSON.stringify(data), { expirationTtl: ttlSeconds });
@@ -252,8 +276,17 @@ async function getTrainBoard(env, stationId, { direction, windowMinutes, limit, 
     loadArrivalTimes(),
   ]);
 
-  // Trains whose last stop is this station can't be boarded here.
-  const daily = dailyAll.filter((t) => t.EndingStationID !== stationId);
+  // Trains whose last stop is this station can't be boarded here. TDX has also
+  // returned a whole day's timetable with every train listed three times, byte
+  // for byte (2026-11-26), so keep only the first of each train.
+  const seen = new Set();
+  const daily = dailyAll.filter((t) => {
+    if (t.EndingStationID === stationId) return false;
+    const key = `${t.TrainNo}|${t.Direction}|${t.DepartureTime}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const liveByTrainNo = new Map();
   for (const t of live) {
